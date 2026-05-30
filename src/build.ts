@@ -1,5 +1,5 @@
 // pattern: Imperative Shell
-// Orchestrator: pull a docket from CourtListener, map to Cranch records, hash a
+// Orchestrator: pull a docket from CourtListener, map to RC Ape records, hash a
 // bounded document subset, build the signed repo + CAR, and emit a web view.
 
 import { mkdir, writeFile } from "node:fs/promises";
@@ -17,9 +17,9 @@ import {
 import { type RecordInput, buildRepoCar, nextRkey } from "./repo.js";
 import { renderCaseHtml } from "./webview.js";
 
-const DOCKET_COLLECTION = "com.proptermalone.cranch.docket";
-const ENTRY_COLLECTION = "com.proptermalone.cranch.docketEntry";
-const PARTY_COLLECTION = "com.proptermalone.cranch.party";
+const DOCKET_COLLECTION = "org.rcape.docket";
+const ENTRY_COLLECTION = "org.rcape.docketEntry";
+const PARTY_COLLECTION = "org.rcape.party";
 
 export interface BuildOptions {
   docketId: number;
@@ -94,7 +94,7 @@ export async function build(opts: BuildOptions): Promise<void> {
     renderCaseHtml(docketRecord, entryRecords, { did: built.did }),
   );
 
-  console.log("\n=== Cranch repo built ===");
+  console.log("\n=== RC Ape repo built ===");
   console.log(`DID (offline did:key): ${built.did}`);
   console.log(`Commit CID:            ${built.commitCid}`);
   console.log(

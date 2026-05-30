@@ -1,6 +1,6 @@
 {
   "lexicon": 1,
-  "id": "com.proptermalone.cranch.docketEntry",
+  "id": "org.rcape.docketEntry",
   "defs": {
     "main": {
       "type": "record",
@@ -15,7 +15,7 @@
           "dateFiled": { "type": "string", "format": "datetime" },
           "description": { "type": "string", "maxGraphemes": 5000, "description": "The docket entry text." },
           "documents": { "type": "array", "items": { "type": "ref", "ref": "#document" } },
-          "source": { "type": "ref", "ref": "com.proptermalone.cranch.docket#source" },
+          "source": { "type": "ref", "ref": "org.rcape.docket#source" },
           "createdAt": { "type": "string", "format": "datetime" },
           "docPost": { "type": "ref", "ref": "#postRef", "description": "Backdated document post (dated archive entry) — takedown linkage." },
           "announcePost": { "type": "ref", "ref": "#postRef", "description": "Realtime QT announcement post — takedown linkage." }

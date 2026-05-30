@@ -1,5 +1,5 @@
 // pattern: Functional Core
-// Pure mappers from CourtListener records to Cranch lexicon records.
+// Pure mappers from CourtListener records to RC Ape lexicon records.
 // No I/O: document CIDs are supplied via a precomputed url->cid map.
 
 import type {
@@ -23,7 +23,7 @@ export interface Source {
 }
 
 export interface DocketRecord {
-  $type: "com.proptermalone.cranch.docket";
+  $type: "org.rcape.docket";
   court: string;
   courtName?: string;
   docketNumber: string;
@@ -47,7 +47,7 @@ export interface DocumentRef {
 }
 
 export interface DocketEntryRecord {
-  $type: "com.proptermalone.cranch.docketEntry";
+  $type: "org.rcape.docketEntry";
   entryNumber?: number;
   recapSequenceNumber?: string;
   dateFiled: string;
@@ -65,7 +65,7 @@ export interface AttorneyRef {
 }
 
 export interface PartyRecord {
-  $type: "com.proptermalone.cranch.party";
+  $type: "org.rcape.party";
   name: string;
   role?: string;
   attorneys?: AttorneyRef[];
@@ -97,7 +97,7 @@ export function mapDocket(
   createdAt: string,
 ): DocketRecord {
   return {
-    $type: "com.proptermalone.cranch.docket",
+    $type: "org.rcape.docket",
     court: docket.court_id ?? "unknown",
     docketNumber: docket.docket_number ?? "unknown",
     caseName: docket.case_name ?? docket.case_name_full ?? "Unknown case",
@@ -139,7 +139,7 @@ export function mapEntry(
       };
     });
   return {
-    $type: "com.proptermalone.cranch.docketEntry",
+    $type: "org.rcape.docketEntry",
     entryNumber: entry.entry_number ?? undefined,
     recapSequenceNumber: entry.recap_sequence_number ?? undefined,
     dateFiled: toIsoDatetime(entry.date_filed) ?? createdAt,
@@ -159,7 +159,7 @@ export function mapParty(
     .filter((a): a is typeof a & { name: string } => Boolean(a.name))
     .map((a) => ({ name: a.name }));
   return {
-    $type: "com.proptermalone.cranch.party",
+    $type: "org.rcape.party",
     name: party.name ?? "Unknown party",
     role: party.party_types?.[0]?.name ?? undefined,
     attorneys: attorneys.length ? attorneys : undefined,

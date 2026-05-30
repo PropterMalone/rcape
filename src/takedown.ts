@@ -16,7 +16,7 @@ interface DeleteTarget {
   rkey: string;
 }
 
-const ENTRY_COLLECTION = "com.proptermalone.cranch.docketEntry";
+const ENTRY_COLLECTION = "org.rcape.docketEntry";
 
 function uriToTarget(uri: string): DeleteTarget | null {
   const m = uri.match(/^at:\/\/[^/]+\/([^/]+)\/([^/]+)$/);

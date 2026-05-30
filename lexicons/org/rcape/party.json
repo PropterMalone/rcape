@@ -1,6 +1,6 @@
 {
   "lexicon": 1,
-  "id": "com.proptermalone.cranch.party",
+  "id": "org.rcape.party",
   "defs": {
     "main": {
       "type": "record",
@@ -13,7 +13,7 @@
           "name": { "type": "string" },
           "role": { "type": "string", "description": "e.g. 'Plaintiff', 'Defendant', 'Petitioner', 'Respondent', 'Amicus'." },
           "attorneys": { "type": "array", "items": { "type": "ref", "ref": "#attorney" } },
-          "source": { "type": "ref", "ref": "com.proptermalone.cranch.docket#source" },
+          "source": { "type": "ref", "ref": "org.rcape.docket#source" },
           "createdAt": { "type": "string", "format": "datetime" }
         }
       }

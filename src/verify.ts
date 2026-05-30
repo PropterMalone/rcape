@@ -1,5 +1,5 @@
 // pattern: Imperative Shell
-// Round-trips a Cranch CAR file: loads it as an atproto repo and lists records
+// Round-trips an RC Ape CAR file: loads it as an atproto repo and lists records
 // by collection — demonstrating that "browse the case" is just listRecords over
 // the repo, with no separate database.
 
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
   }
   console.log(`Total records: ${total}`);
 
-  const entries = contents["com.proptermalone.cranch.docketEntry"] ?? {};
+  const entries = contents["org.rcape.docketEntry"] ?? {};
   console.log("First entries in docket order:");
   for (const rkey of Object.keys(entries).slice(0, 3)) {
     const r = entries[rkey] as EntryView;

@@ -1,5 +1,5 @@
 // pattern: Functional Core (type declarations only)
-// Subset of CourtListener REST v4 fields used by Cranch. Confirmed against
+// Subset of CourtListener REST v4 fields used by RC Ape. Confirmed against
 // docket 69777799 (Abrego Garcia v. Noem) on 2026-05-29.
 
 export interface ClDocket {

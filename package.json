@@ -1,9 +1,9 @@
 {
-  "name": "cranch",
+  "name": "rcape",
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Court dockets as AT Protocol repos — follow and browse a case natively.",
+  "description": "RC Ape — court dockets as AT Protocol repos — follow and browse a case natively.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

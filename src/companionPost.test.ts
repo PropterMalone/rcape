@@ -3,7 +3,7 @@ import { entryToPost } from "./companionPost.js";
 import type { DocketEntryRecord } from "./map.js";
 
 const entry: DocketEntryRecord = {
-  $type: "com.proptermalone.cranch.docketEntry",
+  $type: "org.rcape.docketEntry",
   entryNumber: 1,
   recapSequenceNumber: "2025-03-24.001",
   dateFiled: "2025-03-24T00:00:00.000Z",

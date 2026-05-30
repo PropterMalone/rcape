@@ -61,7 +61,7 @@ export function renderCaseHtml(
   ]
     .filter(Boolean)
     .join(" · ");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(docket.caseName)} — Cranch</title><style>${CSS}</style></head><body>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(docket.caseName)} — RC Ape</title><style>${CSS}</style></head><body>
 <header>
 <h1>${esc(docket.caseName)}</h1>
 <p class="meta">${esc(docket.docketNumber)} · ${esc(docket.court)} · filed ${esc((docket.dateFiled ?? "").slice(0, 10))} · Judge ${esc(docket.assignedJudge ?? "—")}</p>
@@ -71,6 +71,6 @@ ${idline ? `<p class="id">${idline}</p>` : ""}
 <table><thead><tr><th>#</th><th>Filed</th><th>Entry</th></tr></thead><tbody>
 ${rows}
 </tbody></table>
-<footer>Cranch — court dockets as AT Protocol repos. Each docket entry is a signed, content-addressed record; the case is a single repo you can <em>follow</em> and <em>browse</em>.</footer>
+<footer>RC Ape — court dockets as AT Protocol repos. Each docket entry is a signed, content-addressed record; the case is a single repo you can <em>follow</em> and <em>browse</em>.</footer>
 </body></html>`;
 }

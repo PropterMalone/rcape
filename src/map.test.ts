@@ -43,7 +43,7 @@ describe("mapDocket", () => {
       "2026-05-29T00:00:00.000Z",
       "2026-05-29T00:00:00.000Z",
     );
-    expect(r.$type).toBe("com.proptermalone.cranch.docket");
+    expect(r.$type).toBe("org.rcape.docket");
     expect(r.caseName).toBe("Abrego Garcia v. Noem");
     expect(r.court).toBe("mdd");
     expect(r.docketNumber).toBe("8:25-cv-00951");

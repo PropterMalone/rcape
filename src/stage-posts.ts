@@ -18,9 +18,9 @@ async function main(): Promise<void> {
   let docket: DocketRecord | undefined;
   const entries: DocketEntryRecord[] = [];
   for await (const e of repo.walkRecords()) {
-    if (e.collection === "com.proptermalone.cranch.docket") {
+    if (e.collection === "org.rcape.docket") {
       docket = e.record as unknown as DocketRecord;
-    } else if (e.collection === "com.proptermalone.cranch.docketEntry") {
+    } else if (e.collection === "org.rcape.docketEntry") {
       entries.push(e.record as unknown as DocketEntryRecord);
     }
   }

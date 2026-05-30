@@ -1,5 +1,5 @@
 // pattern: Imperative Shell
-// Populates the live PDS case repo with the cranch.* records from a built CAR.
+// Populates the live PDS case repo with the org.rcape.* records from a built CAR.
 // Records are non-social (the Bluesky AppView ignores unknown collections); they
 // make "browse via listRecords" work on the live repo. Companion social posts
 // are NOT handled here — those are staged + published separately, on review.
@@ -14,13 +14,13 @@ interface RecordRow {
   value: Record<string, unknown>;
 }
 
-async function loadCranchRecords(carPath: string): Promise<RecordRow[]> {
+async function loadRcapeRecords(carPath: string): Promise<RecordRow[]> {
   const bytes = new Uint8Array(await readFile(carPath));
   const { root, blocks } = await readCarWithRoot(bytes);
   const repo = await Repo.load(new MemoryBlockstore(blocks), root);
   const out: RecordRow[] = [];
   for await (const e of repo.walkRecords()) {
-    if (!e.collection.startsWith("com.proptermalone.cranch.")) continue;
+    if (!e.collection.startsWith("org.rcape.")) continue;
     out.push({
       collection: e.collection,
       rkey: e.rkey,
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   const did = agent.session?.did;
   if (!did) throw new Error("login failed");
 
-  const records = await loadCranchRecords(carPath);
+  const records = await loadRcapeRecords(carPath);
   console.log(`loading ${records.length} records into ${did}`);
 
   const BATCH = 20;

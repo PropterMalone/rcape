@@ -1,6 +1,6 @@
 {
   "lexicon": 1,
-  "id": "com.proptermalone.cranch.docket",
+  "id": "org.rcape.docket",
   "defs": {
     "main": {
       "type": "record",
@@ -31,7 +31,7 @@
         "provider": { "type": "string", "description": "Upstream source, e.g. 'courtlistener'." },
         "providerDocketId": { "type": "string", "description": "Upstream's stable id for this docket." },
         "url": { "type": "string", "format": "uri", "description": "Canonical upstream URL." },
-        "retrievedAt": { "type": "string", "format": "datetime", "description": "When Cranch observed this content (witness timestamp)." }
+        "retrievedAt": { "type": "string", "format": "datetime", "description": "When RC Ape observed this content (witness timestamp)." }
       }
     }
   }
