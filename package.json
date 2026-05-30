@@ -19,6 +19,7 @@
     "takedown": "node --env-file=.env --import tsx src/takedown.ts",
     "fire": "node --env-file=.env --import tsx src/fire.ts",
     "provision": "node --env-file=.env --import tsx src/provisionCase.ts",
+    "bot": "node --env-file=.env --import tsx src/bot.ts",
     "validate": "biome check . && tsc --noEmit && vitest run && knip"
   },
   "dependencies": {

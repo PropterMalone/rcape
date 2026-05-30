@@ -42,6 +42,7 @@ export type ProvisionResult =
       status: "provisioned";
       handle: string;
       did: string;
+      caseName: string;
       published: number;
       failed: number;
     }
@@ -179,6 +180,7 @@ export async function runProvision(
     status: "provisioned",
     handle: account.handle,
     did: account.did,
+    caseName: mapped.docketRecord.caseName,
     published: result.published,
     failed: result.failed.length,
   };

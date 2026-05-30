@@ -1,0 +1,25 @@
+# RC Ape @-mention bot — systemd unit (reboot-survivable).
+# Install (on Malone):
+#   sudo cp deploy/rcape-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rcape-bot
+# Logs: journalctl -u rcape-bot -f
+#
+# Adjust User/WorkingDirectory to match the checkout. The bot reads creds from
+# the project .env (loaded by the `bot` npm script via node --env-file).
+
+[Unit]
+Description=RC Ape @-mention bot (provisions court-docket repos on request)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rcape
+WorkingDirectory=/opt/rcape
+ExecStart=/usr/bin/npm run bot
+Restart=always
+RestartSec=10
+# The poll loop is resilient to transient errors; restart covers crashes/reboots.
+
+[Install]
+WantedBy=multi-user.target
