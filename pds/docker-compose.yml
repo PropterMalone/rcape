@@ -1,0 +1,11 @@
+services:
+  pds:
+    image: ghcr.io/bluesky-social/pds:latest
+    container_name: cranch-pds
+    restart: unless-stopped
+    ports:
+      - "2583:3000"
+    env_file:
+      - pds.env
+    volumes:
+      - ./data:/pds

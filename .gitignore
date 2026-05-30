@@ -3,5 +3,7 @@ dist/
 .env
 *.car
 data/
+pds/data/
+pds/pds.env
 *.log
 .DS_Store
