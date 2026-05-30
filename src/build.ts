@@ -23,10 +23,15 @@ const DOCKET_COLLECTION = "org.rcape.docket";
 const ENTRY_COLLECTION = "org.rcape.docketEntry";
 const PARTY_COLLECTION = "org.rcape.party";
 
-export interface BuildOptions {
+export interface MapOptions {
   docketId: number;
   token: string;
   hashFirstNEntries: number;
+}
+
+// build() also writes the offline CAR + HTML artifacts to outDir; the mapper
+// (fetchAndMapCase) does no I/O and ignores it, hence the split.
+export interface BuildOptions extends MapOptions {
   outDir: string;
 }
 
@@ -43,7 +48,7 @@ export interface MappedCase {
 // validate a case before provisioning. An optional client lets callers track
 // the CL request count for quota accounting.
 export async function fetchAndMapCase(
-  opts: BuildOptions,
+  opts: MapOptions,
   client: CourtListenerClient = new CourtListenerClient(opts.token),
 ): Promise<MappedCase> {
   const now = new Date().toISOString();

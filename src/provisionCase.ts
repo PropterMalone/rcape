@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   );
   // Validates the docket exists — fetchAndMapCase throws on a CL 404.
   const mapped = await fetchAndMapCase(
-    { docketId, token, hashFirstNEntries: hashN, outDir: "data" },
+    { docketId, token, hashFirstNEntries: hashN },
     client,
   );
   // CL calls are real spend — persist the quota charge now so it survives any
