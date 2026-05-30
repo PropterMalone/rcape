@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { truncate } from "./companionPost.js";
 import { type ReplyKind, buildReply } from "./reply.js";
 
+const graphemes = (s: string): number =>
+  [...new Intl.Segmenter().segment(s)].length;
+
 const all: ReplyKind[] = [
-  { kind: "ack", caseName: "Abrego Garcia v. Noem" },
-  { kind: "queued", caseName: "Abrego Garcia v. Noem", ahead: 3 },
+  { kind: "ack", docketId: 69777799 },
+  { kind: "queued", docketId: 69777799, ahead: 3 },
   {
     kind: "provisioned",
     caseName: "Abrego Garcia v. Noem",
@@ -19,9 +21,7 @@ const all: ReplyKind[] = [
 describe("buildReply", () => {
   it("every variant stays within the 300-grapheme post limit", () => {
     for (const r of all) {
-      expect(
-        [...new Intl.Segmenter().segment(buildReply(r))].length,
-      ).toBeLessThanOrEqual(300);
+      expect(graphemes(buildReply(r))).toBeLessThanOrEqual(300);
     }
   });
 
@@ -46,8 +46,12 @@ describe("buildReply", () => {
       handle: "case-9.rcape.org",
     });
     expect(out).toContain("@case-9.rcape.org");
-    expect([...new Intl.Segmenter().segment(out)].length).toBeLessThanOrEqual(
-      300,
+    expect(graphemes(out)).toBeLessThanOrEqual(300);
+  });
+
+  it("references the docket id in the ack (case name not yet known)", () => {
+    expect(buildReply({ kind: "ack", docketId: 69777799 })).toContain(
+      "69777799",
     );
   });
 
@@ -63,15 +67,7 @@ describe("buildReply", () => {
 
   it("reports the queue position on a quota-deferred request", () => {
     expect(
-      buildReply({ kind: "queued", caseName: "Doe v. Roe", ahead: 5 }),
+      buildReply({ kind: "queued", docketId: 123456, ahead: 5 }),
     ).toContain("5");
-  });
-
-  it("clamps a long case name in the ack", () => {
-    const longName = "x".repeat(200);
-    const out = buildReply({ kind: "ack", caseName: longName });
-    // the clamped name is shorter than the raw input
-    expect(out).toContain(truncate(longName, 80));
-    expect(out).not.toContain("x".repeat(200));
   });
 });
