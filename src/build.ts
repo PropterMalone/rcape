@@ -7,6 +7,7 @@ import { CourtListenerClient } from "./courtlistener.js";
 import { hashDocuments } from "./hash.js";
 import {
   type DocketEntryRecord,
+  type DocketRecord,
   type PartyRecord,
   makeSource,
   mapDocket,
@@ -28,8 +29,22 @@ export interface BuildOptions {
   outDir: string;
 }
 
-export async function build(opts: BuildOptions): Promise<void> {
-  const client = new CourtListenerClient(opts.token);
+export interface MappedCase {
+  docketRecord: DocketRecord;
+  entryRecords: DocketEntryRecord[];
+  parties: PartyRecord[];
+  records: RecordInput[];
+}
+
+// Pull a docket from CourtListener and map it to RC Ape lexicon records. Shared
+// by the offline CAR builder (below) and the on-demand provisioner. Throws if
+// the docket does not exist (CourtListener 404) — callers rely on that to
+// validate a case before provisioning. An optional client lets callers track
+// the CL request count for quota accounting.
+export async function fetchAndMapCase(
+  opts: BuildOptions,
+  client: CourtListenerClient = new CourtListenerClient(opts.token),
+): Promise<MappedCase> {
   const now = new Date().toISOString();
 
   console.log(`Fetching docket ${opts.docketId}…`);
@@ -82,6 +97,13 @@ export async function build(opts: BuildOptions): Promise<void> {
     })),
   ];
 
+  return { docketRecord, entryRecords, parties, records };
+}
+
+export async function build(opts: BuildOptions): Promise<void> {
+  const { docketRecord, entryRecords, parties, records } =
+    await fetchAndMapCase(opts);
+
   console.log(`Building signed repo with ${records.length} records…`);
   const built = await buildRepoCar(records);
 
@@ -108,8 +130,8 @@ export async function build(opts: BuildOptions): Promise<void> {
 async function main(): Promise<void> {
   const token = process.env.COURTLISTENER_API_TOKEN;
   if (!token) throw new Error("COURTLISTENER_API_TOKEN not set");
-  const docketId = Number(process.env.CRANCH_DOCKET_ID ?? "69777799");
-  const hashN = Number(process.env.CRANCH_HASH_FIRST_N ?? "15");
+  const docketId = Number(process.env.RCAPE_DOCKET_ID ?? "69777799");
+  const hashN = Number(process.env.RCAPE_HASH_FIRST_N ?? "15");
   await build({ docketId, token, hashFirstNEntries: hashN, outDir: "data" });
 }
 

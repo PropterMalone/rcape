@@ -5,20 +5,14 @@
 // are NOT handled here — those are staged + published separately, on review.
 
 import { readFile } from "node:fs/promises";
-import { AtpAgent } from "@atproto/api";
 import { MemoryBlockstore, Repo, readCarWithRoot } from "@atproto/repo";
+import { CaseRepo, type CreateRow } from "./caseRepo.js";
 
-interface RecordRow {
-  collection: string;
-  rkey: string;
-  value: Record<string, unknown>;
-}
-
-async function loadRcapeRecords(carPath: string): Promise<RecordRow[]> {
+async function loadRcapeRecords(carPath: string): Promise<CreateRow[]> {
   const bytes = new Uint8Array(await readFile(carPath));
   const { root, blocks } = await readCarWithRoot(bytes);
   const repo = await Repo.load(new MemoryBlockstore(blocks), root);
-  const out: RecordRow[] = [];
+  const out: CreateRow[] = [];
   for await (const e of repo.walkRecords()) {
     if (!e.collection.startsWith("org.rcape.")) continue;
     out.push({
@@ -31,38 +25,22 @@ async function loadRcapeRecords(carPath: string): Promise<RecordRow[]> {
 }
 
 async function main(): Promise<void> {
-  const host = process.env.PDS_HOSTNAME ?? "pds.rcape.org";
-  const identifier = process.env.CRANCH_CASE_DID;
-  const password = process.env.CRANCH_CASE_PASSWORD;
+  const identifier = process.env.RCAPE_CASE_DID;
+  const password = process.env.RCAPE_CASE_PASSWORD;
   if (!identifier || !password) {
-    throw new Error("CRANCH_CASE_DID / CRANCH_CASE_PASSWORD not set");
+    throw new Error("RCAPE_CASE_DID / RCAPE_CASE_PASSWORD not set");
   }
   const carPath = process.argv[2] ?? "data/69777799.car";
 
-  const agent = new AtpAgent({ service: `https://${host}` });
-  await agent.login({ identifier, password });
-  const did = agent.session?.did;
-  if (!did) throw new Error("login failed");
+  const repo = await CaseRepo.login({
+    host: process.env.PDS_HOSTNAME,
+    identifier,
+    password,
+  });
 
   const records = await loadRcapeRecords(carPath);
-  console.log(`loading ${records.length} records into ${did}`);
-
-  const BATCH = 20;
-  for (let i = 0; i < records.length; i += BATCH) {
-    const slice = records.slice(i, i + BATCH);
-    await agent.com.atproto.repo.applyWrites({
-      repo: did,
-      writes: slice.map((r) => ({
-        $type: "com.atproto.repo.applyWrites#create",
-        collection: r.collection,
-        rkey: r.rkey,
-        value: r.value,
-      })),
-    });
-    console.log(
-      `  wrote ${Math.min(i + BATCH, records.length)}/${records.length}`,
-    );
-  }
+  console.log(`loading ${records.length} records into ${repo.did}`);
+  await repo.applyCreates(records);
   console.log("done");
 }
 

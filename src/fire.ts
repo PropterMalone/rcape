@@ -1,12 +1,12 @@
 // pattern: Imperative Shell
-// Publishes the social layer for the case backfill: the profile, one pinned seed
+// Publishes the social layer for a case backfill: the profile, one pinned seed
 // post, and one BACKDATED doc-post per docket entry (createdAt = filing date),
 // linking each post back onto its docketEntry record (docPost strongRef) so a
 // takedown removes the post with the entry. QTs are forward-only (the monitor),
-// NOT part of the backfill. `--dry-run` stages without publishing. Idempotency:
-// refuses to run if doc-posts already exist unless `--force`.
+// NOT part of the backfill. `fireBackfill` is the callable core (also used by the
+// provisioner); the CLI adds a `--dry-run` preview and `--force` override.
 
-import { AtpAgent } from "@atproto/api";
+import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, entryToPost, truncate } from "./companionPost.js";
 import type { DocketEntryRecord, DocketRecord, PostRef } from "./map.js";
 
@@ -15,42 +15,25 @@ const ENTRY = "org.rcape.docketEntry";
 const POST = "app.bsky.feed.post";
 const PROFILE = "app.bsky.actor.profile";
 
-interface LiveEntry {
-  rkey: string;
-  value: DocketEntryRecord;
-}
-
 const COURT_LABELS: Record<string, string> = { mdd: "D. Md." };
 function courtLabel(id: string): string {
   return COURT_LABELS[id] ?? id;
 }
 
-async function loadDocket(agent: AtpAgent, did: string): Promise<DocketRecord> {
-  const { data } = await agent.com.atproto.repo.getRecord({
-    repo: did,
-    collection: DOCKET,
-    rkey: "self",
-  });
-  return data.value as unknown as DocketRecord;
+interface LiveEntry {
+  rkey: string;
+  value: DocketEntryRecord;
 }
 
-async function loadEntries(agent: AtpAgent, did: string): Promise<LiveEntry[]> {
+async function loadDocket(repo: CaseRepo): Promise<DocketRecord> {
+  return (await repo.getRecord(DOCKET, "self")) as unknown as DocketRecord;
+}
+
+async function loadEntries(repo: CaseRepo): Promise<LiveEntry[]> {
   const out: LiveEntry[] = [];
-  let cursor: string | undefined;
-  do {
-    const { data } = await agent.com.atproto.repo.listRecords({
-      repo: did,
-      collection: ENTRY,
-      limit: 100,
-      cursor,
-    });
-    for (const r of data.records) {
-      const rkey = r.uri.split("/").pop();
-      if (rkey)
-        out.push({ rkey, value: r.value as unknown as DocketEntryRecord });
-    }
-    cursor = data.cursor;
-  } while (cursor);
+  for await (const r of repo.listAll(ENTRY)) {
+    out.push({ rkey: r.rkey, value: r.value as unknown as DocketEntryRecord });
+  }
   out.sort((a, b) =>
     (a.value.recapSequenceNumber ?? "").localeCompare(
       b.value.recapSequenceNumber ?? "",
@@ -59,33 +42,19 @@ async function loadEntries(agent: AtpAgent, did: string): Promise<LiveEntry[]> {
   return out;
 }
 
-async function hasAnyPosts(agent: AtpAgent, did: string): Promise<boolean> {
-  const { data } = await agent.com.atproto.repo.listRecords({
-    repo: did,
-    collection: POST,
-    limit: 1,
-  });
-  return data.records.length > 0;
+async function hasAnyPosts(repo: CaseRepo): Promise<boolean> {
+  for await (const _post of repo.listAll(POST)) {
+    return true;
+  }
+  return false;
 }
 
-async function main(): Promise<void> {
-  const dryRun = process.argv.includes("--dry-run");
-  const force = process.argv.includes("--force");
-  const host = process.env.PDS_HOSTNAME ?? "pds.rcape.org";
-  const did = process.env.CRANCH_CASE_DID;
-  const password = process.env.CRANCH_CASE_PASSWORD;
-  if (!did || !password) {
-    throw new Error("CRANCH_CASE_DID / CRANCH_CASE_PASSWORD not set");
-  }
+export interface ProfileAndSeed {
+  profile: Record<string, unknown>;
+  seedText: string;
+}
 
-  const agent = new AtpAgent({ service: `https://${host}` });
-  await agent.login({ identifier: did, password });
-
-  const docket = await loadDocket(agent, did);
-  const entries = await loadEntries(agent, did);
-  const caseUrl = docket.source.url ?? "https://www.courtlistener.com/";
-  const now = new Date().toISOString();
-
+export function buildProfileAndSeed(docket: DocketRecord): ProfileAndSeed {
   const profile = {
     $type: PROFILE,
     displayName: truncate(docket.caseName, 64),
@@ -99,8 +68,96 @@ async function main(): Promise<void> {
     `${docket.caseName} (${docket.docketNumber}) is now mirrored here, filing by filing — browse the docket as signed records or follow for new activity. Unofficial; source: CourtListener.`,
     300,
   );
+  return { profile, seedText };
+}
+
+export interface FireResult {
+  published: number;
+  failed: string[];
+}
+
+export async function fireBackfill(
+  repo: CaseRepo,
+  opts: { force?: boolean } = {},
+): Promise<FireResult> {
+  const docket = await loadDocket(repo);
+  const entries = await loadEntries(repo);
+  if ((await hasAnyPosts(repo)) && !opts.force) {
+    throw new Error(
+      "refusing to fire: posts already exist on the account. Pass force only if you intend duplicates.",
+    );
+  }
+  const caseUrl = docket.source.url ?? "https://www.courtlistener.com/";
+  const now = new Date().toISOString();
+  const { profile, seedText } = buildProfileAndSeed(docket);
+
+  const seed = await repo.createRecord(POST, {
+    $type: POST,
+    text: seedText,
+    createdAt: now,
+    labels: BOT_SELF_LABEL,
+  });
+  await repo.putRecord(PROFILE, "self", {
+    ...profile,
+    pinnedPost: { uri: seed.uri, cid: seed.cid },
+    createdAt: now,
+  });
+  console.log("profile + pinned seed published");
+
+  let published = 0;
+  const failed: string[] = [];
+  for (const e of entries) {
+    try {
+      const post = entryToPost(
+        e.value,
+        docket.caseName,
+        caseUrl,
+        e.value.dateFiled,
+      );
+      const created = await repo.createRecord(
+        POST,
+        post as unknown as Record<string, unknown>,
+      );
+      const docPost: PostRef = { uri: created.uri, cid: created.cid };
+      await repo.putRecord(ENTRY, e.rkey, {
+        ...e.value,
+        docPost,
+      } as unknown as Record<string, unknown>);
+      if (++published % 25 === 0) {
+        console.log(`  posted ${published}/${entries.length}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  entry ${e.rkey} failed: ${msg}`);
+      failed.push(e.rkey);
+    }
+  }
+  console.log(
+    `done — ${published}/${entries.length} doc-posts published, ${failed.length} failed on @${repo.handle}.`,
+  );
+  if (failed.length > 0) console.error(`failed rkeys: ${failed.join(", ")}`);
+  return { published, failed };
+}
+
+async function main(): Promise<void> {
+  const dryRun = process.argv.includes("--dry-run");
+  const force = process.argv.includes("--force");
+  const identifier = process.env.RCAPE_CASE_DID;
+  const password = process.env.RCAPE_CASE_PASSWORD;
+  if (!identifier || !password) {
+    throw new Error("RCAPE_CASE_DID / RCAPE_CASE_PASSWORD not set");
+  }
+  const repo = await CaseRepo.login({
+    host: process.env.PDS_HOSTNAME,
+    identifier,
+    password,
+  });
 
   if (dryRun) {
+    const docket = await loadDocket(repo);
+    const entries = await loadEntries(repo);
+    const caseUrl = docket.source.url ?? "https://www.courtlistener.com/";
+    const { profile, seedText } = buildProfileAndSeed(docket);
     console.log("=== [dry-run] nothing published ===");
     console.log("displayName:", profile.displayName);
     console.log("description:", profile.description);
@@ -116,91 +173,21 @@ async function main(): Promise<void> {
       );
       console.log(`  [${p.createdAt.slice(0, 10)}] ${truncate(p.text, 140)}`);
     }
-    console.log("oldest 1 sample:");
-    const o = entries[0];
-    if (o) {
+    const oldest = entries[0];
+    if (oldest) {
       const p = entryToPost(
-        o.value,
+        oldest.value,
         docket.caseName,
         caseUrl,
-        o.value.dateFiled,
+        oldest.value.dateFiled,
       );
+      console.log("oldest 1 sample:");
       console.log(`  [${p.createdAt.slice(0, 10)}] ${truncate(p.text, 140)}`);
     }
     return;
   }
 
-  const alreadyHasPosts = await hasAnyPosts(agent, did);
-  if (alreadyHasPosts && !force) {
-    throw new Error(
-      "refusing to fire: posts already exist on the account. Re-run with --force only if you intend duplicates.",
-    );
-  }
-
-  // 1. pinned seed (current-dated)
-  const seed = await agent.com.atproto.repo.createRecord({
-    repo: did,
-    collection: POST,
-    record: {
-      $type: POST,
-      text: seedText,
-      createdAt: now,
-      labels: BOT_SELF_LABEL,
-    },
-  });
-  // 2. profile, pinning the seed
-  await agent.com.atproto.repo.putRecord({
-    repo: did,
-    collection: PROFILE,
-    rkey: "self",
-    record: {
-      ...profile,
-      pinnedPost: { uri: seed.data.uri, cid: seed.data.cid },
-      createdAt: now,
-    },
-  });
-  console.log("profile + pinned seed published");
-
-  // 3. backfill backdated doc-posts, linking each onto its entry
-  let i = 0;
-  const failures: string[] = [];
-  for (const e of entries) {
-    try {
-      const post = entryToPost(
-        e.value,
-        docket.caseName,
-        caseUrl,
-        e.value.dateFiled,
-      );
-      const created = await agent.com.atproto.repo.createRecord({
-        repo: did,
-        collection: POST,
-        record: post,
-      });
-      const docPost: PostRef = {
-        uri: created.data.uri,
-        cid: created.data.cid,
-      };
-      await agent.com.atproto.repo.putRecord({
-        repo: did,
-        collection: ENTRY,
-        rkey: e.rkey,
-        record: { ...e.value, docPost },
-      });
-      if (++i % 25 === 0) console.log(`  posted ${i}/${entries.length}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`  entry ${e.rkey} failed: ${msg}`);
-      failures.push(e.rkey);
-    }
-  }
-  const total = entries.length;
-  console.log(
-    `done — ${i}/${total} doc-posts published, ${failures.length} failed on @${agent.session?.handle ?? did}.`,
-  );
-  if (failures.length > 0) {
-    console.error(`failed rkeys: ${failures.join(", ")}`);
-  }
+  await fireBackfill(repo, { force });
 }
 
 main().catch((e) => {

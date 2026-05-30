@@ -10,7 +10,7 @@ import type { DocketEntryRecord, DocketRecord } from "./map.js";
 
 async function main(): Promise<void> {
   const carPath = process.argv[2] ?? "data/69777799.car";
-  const n = Number(process.env.CRANCH_BACKFILL_N ?? "10");
+  const n = Number(process.env.RCAPE_BACKFILL_N ?? "10");
   const bytes = new Uint8Array(await readFile(carPath));
   const { root, blocks } = await readCarWithRoot(bytes);
   const repo = await Repo.load(new MemoryBlockstore(blocks), root);

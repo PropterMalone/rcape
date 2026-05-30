@@ -10,13 +10,8 @@
 
 import { appendFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { AtpAgent } from "@atproto/api";
+import { CaseRepo, type DeleteTarget } from "./caseRepo.js";
 import type { PostRef } from "./map.js";
-
-interface DeleteTarget {
-  collection: string;
-  rkey: string;
-}
 
 const ENTRY_COLLECTION = "org.rcape.docketEntry";
 const ALLOWED_COLLECTIONS = [
@@ -51,47 +46,28 @@ function parseArgs(argv: string[]): TakedownArgs {
   return args;
 }
 
-async function collectCaseTargets(
-  agent: AtpAgent,
-  did: string,
-): Promise<DeleteTarget[]> {
+async function collectCaseTargets(repo: CaseRepo): Promise<DeleteTarget[]> {
   const targets: DeleteTarget[] = [];
   for (const collection of ALLOWED_COLLECTIONS) {
-    let cursor: string | undefined;
-    do {
-      const { data } = await agent.com.atproto.repo.listRecords({
-        repo: did,
-        collection,
-        limit: 100,
-        cursor,
-      });
-      for (const r of data.records) {
-        const t = uriToTarget(r.uri);
-        if (t) targets.push(t);
-      }
-      cursor = data.cursor;
-    } while (cursor);
+    for await (const r of repo.listAll(collection)) {
+      const t = uriToTarget(r.uri);
+      if (t) targets.push(t);
+    }
   }
   return targets;
 }
 
 async function collectEntryTargets(
-  agent: AtpAgent,
-  did: string,
+  repo: CaseRepo,
   rkey: string,
 ): Promise<DeleteTarget[]> {
   const targets: DeleteTarget[] = [{ collection: ENTRY_COLLECTION, rkey }];
   try {
-    const { data } = await agent.com.atproto.repo.getRecord({
-      repo: did,
-      collection: ENTRY_COLLECTION,
-      rkey,
-    });
-    const v = data.value as {
+    const value = (await repo.getRecord(ENTRY_COLLECTION, rkey)) as {
       docPost?: PostRef & { uri?: string };
       announcePost?: PostRef & { uri?: string };
     };
-    for (const ref of [v.docPost, v.announcePost]) {
+    for (const ref of [value.docPost, value.announcePost]) {
       const t = ref?.uri ? uriToTarget(ref.uri) : null;
       if (t) targets.push(t);
     }
@@ -120,19 +96,21 @@ async function main(): Promise<void> {
     throw new Error("--entry requires a non-empty rkey value");
   }
 
-  const host = process.env.PDS_HOSTNAME ?? "pds.rcape.org";
-  const did = process.env.CRANCH_CASE_DID;
-  const password = process.env.CRANCH_CASE_PASSWORD;
+  const did = process.env.RCAPE_CASE_DID;
+  const password = process.env.RCAPE_CASE_PASSWORD;
   if (!did || !password) {
-    throw new Error("CRANCH_CASE_DID / CRANCH_CASE_PASSWORD not set");
+    throw new Error("RCAPE_CASE_DID / RCAPE_CASE_PASSWORD not set");
   }
 
-  const agent = new AtpAgent({ service: `https://${host}` });
-  await agent.login({ identifier: did, password });
+  const repo = await CaseRepo.login({
+    host: process.env.PDS_HOSTNAME,
+    identifier: did,
+    password,
+  });
 
   const targets = args.whole
-    ? await collectCaseTargets(agent, did)
-    : await collectEntryTargets(agent, did, args.entry as string);
+    ? await collectCaseTargets(repo)
+    : await collectEntryTargets(repo, args.entry as string);
 
   console.log(
     `${args.dryRun ? "[dry-run] would remove" : "removing"} ${targets.length} record(s):`,
@@ -157,17 +135,7 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  const BATCH = 20;
-  for (let i = 0; i < targets.length; i += BATCH) {
-    await agent.com.atproto.repo.applyWrites({
-      repo: did,
-      writes: targets.slice(i, i + BATCH).map((t) => ({
-        $type: "com.atproto.repo.applyWrites#delete",
-        collection: t.collection,
-        rkey: t.rkey,
-      })),
-    });
-  }
+  await repo.applyDeletes(targets);
 
   console.log(
     `done — removed ${targets.length} record(s). Effective on this PDS + the canonical AppView; downstream replicators may retain copies.`,
