@@ -73,6 +73,20 @@ describe("CaseRepo.listAll", () => {
     expect(all).toEqual([]);
     expect(listCalls).toHaveLength(1);
   });
+
+  it("skips records whose URI has no rkey segment", async () => {
+    const { client } = mockClient([
+      {
+        records: [
+          { uri: "at://did/coll/", cid: "1", value: {} }, // trailing slash, no rkey
+          { uri: "at://did/coll/good", cid: "2", value: {} },
+        ],
+      },
+    ]);
+    const repo = CaseRepo.fromClient(client, "did", "h");
+    const rkeys = (await repo.collect("coll")).map((r) => r.rkey);
+    expect(rkeys).toEqual(["good"]);
+  });
 });
 
 describe("CaseRepo.applyCreates / applyDeletes", () => {
