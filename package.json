@@ -14,9 +14,13 @@
     "lint:dead": "knip",
     "build:repo": "node --env-file=.env --import tsx src/build.ts",
     "verify:repo": "node --import tsx src/verify.ts",
+    "publish:records": "node --env-file=.env --import tsx src/publish.ts",
+    "stage:posts": "node --import tsx src/stage-posts.ts",
+    "takedown": "node --env-file=.env --import tsx src/takedown.ts",
     "validate": "biome check . && tsc --noEmit && vitest run && knip"
   },
   "dependencies": {
+    "@atproto/api": "0.13.35",
     "@atproto/common": "0.4.12",
     "@atproto/crypto": "^0.4.4",
     "@atproto/repo": "^0.6.1",

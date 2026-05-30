@@ -16,7 +16,9 @@
           "description": { "type": "string", "maxGraphemes": 5000, "description": "The docket entry text." },
           "documents": { "type": "array", "items": { "type": "ref", "ref": "#document" } },
           "source": { "type": "ref", "ref": "com.proptermalone.cranch.docket#source" },
-          "createdAt": { "type": "string", "format": "datetime" }
+          "createdAt": { "type": "string", "format": "datetime" },
+          "docPost": { "type": "ref", "ref": "#postRef", "description": "Backdated document post (dated archive entry) — takedown linkage." },
+          "announcePost": { "type": "ref", "ref": "#postRef", "description": "Realtime QT announcement post — takedown linkage." }
         }
       }
     },
@@ -32,6 +34,15 @@
         "mimeType": { "type": "string" },
         "pageCount": { "type": "integer" },
         "isAvailable": { "type": "boolean", "description": "Whether the upstream document is currently retrievable." }
+      }
+    },
+    "postRef": {
+      "type": "object",
+      "description": "Strong reference to a companion app.bsky.feed.post (takedown linkage).",
+      "required": ["uri", "cid"],
+      "properties": {
+        "uri": { "type": "string", "format": "at-uri" },
+        "cid": { "type": "string", "format": "cid" }
       }
     }
   }
