@@ -43,9 +43,13 @@ describe("upsertAtprotoTxt", () => {
   });
 
   it("updates the existing record (PUT) when one is present", async () => {
-    const calls: { url: string; method?: string }[] = [];
+    const calls: { url: string; method?: string; body?: unknown }[] = [];
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, method: init?.method });
+      calls.push({
+        url,
+        method: init?.method,
+        body: init?.body ? JSON.parse(init.body as string) : undefined,
+      });
       if (init?.method === "PUT")
         return res(200, { success: true, result: {} });
       return res(200, { success: true, result: [{ id: "rec9" }] });
@@ -58,9 +62,15 @@ describe("upsertAtprotoTxt", () => {
     });
 
     expect(out).toEqual({ created: false });
-    expect(
-      calls.some((c) => c.method === "PUT" && c.url.endsWith("/rec9")),
-    ).toBe(true);
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.url.endsWith("/rec9")).toBe(true);
+    // The update must carry the correct DID — a wrong-DID regression must fail.
+    expect(put?.body).toEqual({
+      type: "TXT",
+      name: "_atproto.a.rcape.org",
+      content: "did=did:plc:xyz",
+      ttl: 60,
+    });
   });
 
   it("throws on a Cloudflare error response", async () => {

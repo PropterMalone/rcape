@@ -35,8 +35,10 @@ async function cf<T>(
   });
   const json = (await r.json()) as CfEnvelope<T>;
   if (!r.ok || !json.success) {
+    // Log only the errors array, never the full response body — an unexpected
+    // envelope can echo request context we don't want in logs.
     throw new Error(
-      `Cloudflare ${method} ${path} failed: ${JSON.stringify(json.errors ?? json)}`,
+      `Cloudflare ${method} ${path} failed (${r.status}): ${JSON.stringify(json.errors ?? "no error detail")}`,
     );
   }
   return json.result as T;
@@ -54,7 +56,7 @@ export async function upsertAtprotoTxt(
   const existing = await cf<{ id: string }[]>(
     fetchImpl,
     "GET",
-    `/zones/${opts.zoneId}/dns_records?type=TXT&name=${encodeURIComponent(name)}`,
+    `/zones/${opts.zoneId}/dns_records?type=TXT&name[exact]=${encodeURIComponent(name)}`,
     opts.token,
   );
 
