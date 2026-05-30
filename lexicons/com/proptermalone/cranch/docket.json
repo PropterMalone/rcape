@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "com.proptermalone.cranch.docket",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A court case/docket. The repo identity IS the case; this self-keyed record carries case-level metadata (analogous to an actor profile).",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["court", "docketNumber", "caseName", "source"],
+        "properties": {
+          "court": { "type": "string", "description": "Court identifier, e.g. CourtListener court id 'mdd'." },
+          "courtName": { "type": "string", "description": "Human-readable court, e.g. 'U.S. District Court, District of Maryland'." },
+          "docketNumber": { "type": "string", "description": "e.g. '8:25-cv-00951'." },
+          "caseName": { "type": "string" },
+          "dateFiled": { "type": "string", "format": "datetime" },
+          "dateTerminated": { "type": "string", "format": "datetime" },
+          "assignedJudge": { "type": "string" },
+          "natureOfSuit": { "type": "string" },
+          "source": { "type": "ref", "ref": "#source" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "description": "Provenance pointer to the upstream record this was mirrored from.",
+      "required": ["provider", "retrievedAt"],
+      "properties": {
+        "provider": { "type": "string", "description": "Upstream source, e.g. 'courtlistener'." },
+        "providerDocketId": { "type": "string", "description": "Upstream's stable id for this docket." },
+        "url": { "type": "string", "format": "uri", "description": "Canonical upstream URL." },
+        "retrievedAt": { "type": "string", "format": "datetime", "description": "When Cranch observed this content (witness timestamp)." }
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "cranch",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Court dockets as AT Protocol repos — follow and browse a case natively.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "lint:dead": "knip",
+    "build:repo": "node --env-file=.env --import tsx src/build.ts",
+    "verify:repo": "node --import tsx src/verify.ts",
+    "validate": "biome check . && tsc --noEmit && vitest run && knip"
+  },
+  "dependencies": {
+    "@atproto/common": "0.4.12",
+    "@atproto/crypto": "^0.4.4",
+    "@atproto/repo": "^0.6.1",
+    "multiformats": "^13.3.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.10.2",
+    "knip": "^5.41.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

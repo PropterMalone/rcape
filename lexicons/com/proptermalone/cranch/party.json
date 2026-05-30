@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "com.proptermalone.cranch.party",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A party to the case and its attorneys of record.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string", "description": "e.g. 'Plaintiff', 'Defendant', 'Petitioner', 'Respondent', 'Amicus'." },
+          "attorneys": { "type": "array", "items": { "type": "ref", "ref": "#attorney" } },
+          "source": { "type": "ref", "ref": "com.proptermalone.cranch.docket#source" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "attorney": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "firm": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "description": "e.g. 'Lead Attorney', 'Attorney to be Noticed'." }
+      }
+    }
+  }
+}

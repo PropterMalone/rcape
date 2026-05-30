@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "com.proptermalone.cranch.docketEntry",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A single docket entry (one filing event) and the documents attached to it. listRecords over this collection yields the full docket in order.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["dateFiled", "description", "source"],
+        "properties": {
+          "entryNumber": { "type": "integer", "description": "Docket entry number; may be absent for some minute/text entries." },
+          "recapSequenceNumber": { "type": "string", "description": "CourtListener ordering key, preserves true docket order." },
+          "dateFiled": { "type": "string", "format": "datetime" },
+          "description": { "type": "string", "maxGraphemes": 5000, "description": "The docket entry text." },
+          "documents": { "type": "array", "items": { "type": "ref", "ref": "#document" } },
+          "source": { "type": "ref", "ref": "com.proptermalone.cranch.docket#source" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "document": {
+      "type": "object",
+      "description": "A filed document. hash+link model: reference the upstream public URL and record the content CID for tamper-evidence, WITHOUT hosting the bytes.",
+      "required": ["sourceUrl"],
+      "properties": {
+        "documentNumber": { "type": "integer", "description": "Attachment/document number within the entry." },
+        "description": { "type": "string" },
+        "sourceUrl": { "type": "string", "format": "uri", "description": "Public CourtListener storage URL for the PDF." },
+        "contentCid": { "type": "string", "description": "CIDv1 (sha2-256, raw) of the PDF bytes — tamper-evidence. Absent until the doc has been fetched and hashed." },
+        "mimeType": { "type": "string" },
+        "pageCount": { "type": "integer" },
+        "isAvailable": { "type": "boolean", "description": "Whether the upstream document is currently retrievable." }
+      }
+    }
+  }
+}
