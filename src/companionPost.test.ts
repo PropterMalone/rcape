@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { entryToPost } from "./companionPost.js";
+import { entryToPost, truncate } from "./companionPost.js";
 import type { DocketEntryRecord } from "./map.js";
 
 const entry: DocketEntryRecord = {
@@ -41,5 +41,28 @@ describe("entryToPost", () => {
     const noDocs = { ...entry, documents: undefined };
     const p = entryToPost(noDocs, "Case", "https://view.example", "t");
     expect(p.embed?.external.uri).toBe("https://view.example");
+  });
+});
+
+describe("truncate (grapheme-aware)", () => {
+  it("passes short strings through unchanged", () => {
+    expect(truncate("hello", 10)).toBe("hello");
+  });
+
+  it("handles flag emoji — counts grapheme clusters, not code units", () => {
+    // 🇺🇸 is 2 UTF-16 code units but 1 grapheme cluster; 301 clusters → must truncate
+    const input = "🇺🇸".repeat(301);
+    const result = truncate(input, 300);
+    const graphemes = [...new Intl.Segmenter().segment(result)];
+    expect(graphemes.length).toBeLessThanOrEqual(300);
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("appends ellipsis within the grapheme budget when truncating", () => {
+    const input = "a".repeat(400);
+    const result = truncate(input, 300);
+    const graphemes = [...new Intl.Segmenter().segment(result)];
+    expect(graphemes.length).toBeLessThanOrEqual(300);
+    expect(result.endsWith("…")).toBe(true);
   });
 });

@@ -5,6 +5,12 @@
 
 import type { DocketEntryRecord } from "./map.js";
 
+// Official atproto automated-account tag — Bluesky renders the `bot` self-label.
+export const BOT_SELF_LABEL = {
+  $type: "com.atproto.label.defs#selfLabels",
+  values: [{ val: "bot" }],
+};
+
 interface BskyExternalEmbed {
   $type: "app.bsky.embed.external";
   external: { uri: string; title: string; description: string };
@@ -15,13 +21,25 @@ interface BskyPost {
   text: string;
   createdAt: string;
   embed?: BskyExternalEmbed;
+  labels?: { $type: string; values: { val: string }[] };
 }
 
 const MAX_GRAPHEMES = 300;
 
-function truncate(s: string, n: number): string {
+const segmenter = new Intl.Segmenter();
+
+/** Grapheme-aware truncation. Counts grapheme clusters, not code units. */
+export function truncate(s: string, n: number): string {
   const t = s.trim();
-  return t.length <= n ? t : `${t.slice(0, Math.max(0, n - 1)).trimEnd()}…`;
+  const segs = [...segmenter.segment(t)];
+  if (segs.length <= n) return t;
+  // trim trailing whitespace before appending ellipsis
+  let end = n - 1;
+  while (end > 0 && segs[end - 1]?.segment.trim() === "") end--;
+  return `${segs
+    .slice(0, end)
+    .map((s) => s.segment)
+    .join("")}…`;
 }
 
 export function entryToPost(
@@ -52,5 +70,6 @@ export function entryToPost(
         description: truncate(entry.description, 280),
       },
     },
+    labels: BOT_SELF_LABEL,
   };
 }

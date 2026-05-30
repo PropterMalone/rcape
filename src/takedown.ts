@@ -9,7 +9,9 @@
 // meaningful action, not a guarantee of universal erasure.
 
 import { appendFile, mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { AtpAgent } from "@atproto/api";
+import type { PostRef } from "./map.js";
 
 interface DeleteTarget {
   collection: string;
@@ -17,8 +19,15 @@ interface DeleteTarget {
 }
 
 const ENTRY_COLLECTION = "org.rcape.docketEntry";
+const ALLOWED_COLLECTIONS = [
+  "org.rcape.docket",
+  "org.rcape.docketEntry",
+  "org.rcape.party",
+  "app.bsky.feed.post",
+  "app.bsky.actor.profile",
+];
 
-function uriToTarget(uri: string): DeleteTarget | null {
+export function uriToTarget(uri: string): DeleteTarget | null {
   const m = uri.match(/^at:\/\/[^/]+\/([^/]+)\/([^/]+)$/);
   return m?.[1] && m[2] ? { collection: m[1], rkey: m[2] } : null;
 }
@@ -47,10 +56,7 @@ async function collectCaseTargets(
   did: string,
 ): Promise<DeleteTarget[]> {
   const targets: DeleteTarget[] = [];
-  const { data: repo } = await agent.com.atproto.repo.describeRepo({
-    repo: did,
-  });
-  for (const collection of repo.collections) {
+  for (const collection of ALLOWED_COLLECTIONS) {
     let cursor: string | undefined;
     do {
       const { data } = await agent.com.atproto.repo.listRecords({
@@ -82,8 +88,8 @@ async function collectEntryTargets(
       rkey,
     });
     const v = data.value as {
-      docPost?: { uri?: string };
-      announcePost?: { uri?: string };
+      docPost?: PostRef & { uri?: string };
+      announcePost?: PostRef & { uri?: string };
     };
     for (const ref of [v.docPost, v.announcePost]) {
       const t = ref?.uri ? uriToTarget(ref.uri) : null;
@@ -104,11 +110,17 @@ async function main(): Promise<void> {
       "--reason is required (basis for the takedown; audit-logged)",
     );
   }
+  if (args.reason.length > 500) {
+    throw new Error("--reason must be 500 characters or fewer");
+  }
   if (!args.whole && !args.entry) {
     throw new Error("specify --case (whole case) or --entry <rkey>");
   }
+  if (!args.whole && (args.entry === undefined || args.entry === "")) {
+    throw new Error("--entry requires a non-empty rkey value");
+  }
 
-  const host = process.env.PDS_HOSTNAME ?? "cranch.proptermalone.com";
+  const host = process.env.PDS_HOSTNAME ?? "pds.rcape.org";
   const did = process.env.CRANCH_CASE_DID;
   const password = process.env.CRANCH_CASE_PASSWORD;
   if (!did || !password) {
@@ -128,6 +140,23 @@ async function main(): Promise<void> {
   for (const t of targets) console.log(`  ${t.collection}/${t.rkey}`);
   if (args.dryRun) return;
 
+  const auditPath = new URL("../data/takedowns.jsonl", import.meta.url)
+    .pathname;
+  await mkdir(new URL("../data", import.meta.url).pathname, {
+    recursive: true,
+  });
+  await appendFile(
+    auditPath,
+    `${JSON.stringify({
+      ts: new Date().toISOString(),
+      scope: args.whole ? "case" : "entry",
+      entry: args.entry,
+      reason: args.reason,
+      did,
+      removed: targets.map((t) => `${t.collection}/${t.rkey}`),
+    })}\n`,
+  );
+
   const BATCH = 20;
   for (let i = 0; i < targets.length; i += BATCH) {
     await agent.com.atproto.repo.applyWrites({
@@ -140,25 +169,14 @@ async function main(): Promise<void> {
     });
   }
 
-  await mkdir("data", { recursive: true });
-  await appendFile(
-    "data/takedowns.jsonl",
-    `${JSON.stringify({
-      ts: new Date().toISOString(),
-      scope: args.whole ? "case" : "entry",
-      entry: args.entry,
-      reason: args.reason,
-      did,
-      removed: targets.map((t) => `${t.collection}/${t.rkey}`),
-    })}\n`,
-  );
-
   console.log(
     `done — removed ${targets.length} record(s). Effective on this PDS + the canonical AppView; downstream replicators may retain copies.`,
   );
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}

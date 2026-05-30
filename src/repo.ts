@@ -32,7 +32,7 @@ export function nextRkey(): string {
 }
 
 // CBOR/lexicon encoding rejects `undefined`; drop those keys recursively.
-function prune<T>(v: T): T {
+export function prune<T>(v: T): T {
   if (Array.isArray(v)) return v.map((x) => prune(x)) as unknown as T;
   if (v && typeof v === "object") {
     const o: Record<string, unknown> = {};

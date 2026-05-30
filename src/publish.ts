@@ -31,7 +31,7 @@ async function loadRcapeRecords(carPath: string): Promise<RecordRow[]> {
 }
 
 async function main(): Promise<void> {
-  const host = process.env.PDS_HOSTNAME ?? "cranch.proptermalone.com";
+  const host = process.env.PDS_HOSTNAME ?? "pds.rcape.org";
   const identifier = process.env.CRANCH_CASE_DID;
   const password = process.env.CRANCH_CASE_PASSWORD;
   if (!identifier || !password) {
@@ -67,6 +67,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(e instanceof Error ? e.message : e);
   process.exit(1);
 });

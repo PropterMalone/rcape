@@ -46,6 +46,11 @@ export interface DocumentRef {
   isAvailable?: boolean;
 }
 
+export interface PostRef {
+  uri: string;
+  cid: string;
+}
+
 export interface DocketEntryRecord {
   $type: "org.rcape.docketEntry";
   entryNumber?: number;
@@ -55,6 +60,8 @@ export interface DocketEntryRecord {
   documents?: DocumentRef[];
   source: Source;
   createdAt: string;
+  docPost?: PostRef;
+  announcePost?: PostRef;
 }
 
 export interface AttorneyRef {

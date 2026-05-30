@@ -17,6 +17,7 @@
     "publish:records": "node --env-file=.env --import tsx src/publish.ts",
     "stage:posts": "node --import tsx src/stage-posts.ts",
     "takedown": "node --env-file=.env --import tsx src/takedown.ts",
+    "fire": "node --env-file=.env --import tsx src/fire.ts",
     "validate": "biome check . && tsc --noEmit && vitest run && knip"
   },
   "dependencies": {
