@@ -86,8 +86,10 @@ async function main(): Promise<void> {
     { docketId, token, hashFirstNEntries: hashN, outDir: "data" },
     client,
   );
-  // CL calls are real spend; record them in both dry-run and live.
+  // CL calls are real spend — persist the quota charge now so it survives any
+  // later failure (the 125/day cap is shared across every case).
   ledger = chargeQuota(ledger, client.requestCount, day);
+  await saveLedger(path, ledger);
 
   const taken = new Set(Object.values(ledger.cases).map((c) => c.handle));
   const handle = deriveHandle(
@@ -112,18 +114,25 @@ async function main(): Promise<void> {
   console.log(`  CL spend this run: ${client.requestCount} calls`);
 
   if (dryRun) {
+    // Quota was already saved above; dry-run writes nothing else.
     console.log(
       "=== [dry-run] no account, no DNS, no records/posts written ===",
     );
     console.log(`would create _atproto.${handle} TXT = did=<new did>`);
-    await saveLedger(path, ledger);
     return;
+  }
+
+  if (existing) {
+    console.warn(
+      `WARNING: docket ${docketId} is already provisioned at @${existing.handle}; --force mints a SECOND account. The prior one is archived in the ledger (not deleted from the PDS).`,
+    );
   }
 
   const adminPassword = requireEnv("PDS_ADMIN_PASSWORD");
   const cfToken = requireEnv("CLOUDFLARE_API_TOKEN");
   const zoneId = requireEnv("CLOUDFLARE_ZONE_ID");
   const password = generatePassword();
+  const createdAt = new Date().toISOString();
 
   console.log("creating account…");
   const account = await createCaseAccount({
@@ -134,6 +143,18 @@ async function main(): Promise<void> {
     password,
   });
   console.log(`  did: ${account.did}`);
+
+  // Persist credentials immediately — before DNS/records/backfill — so a crash
+  // in any later step can't orphan the account or lose its (only-stored)
+  // password, and a re-run hits the dedupe guard instead of minting a duplicate.
+  const entry = {
+    did: account.did,
+    handle: account.handle,
+    password,
+    createdAt,
+  };
+  ledger = recordCase(ledger, docketId, entry);
+  await saveLedger(path, ledger);
 
   const dns = await upsertAtprotoTxt(handle, account.did, {
     zoneId,
@@ -148,6 +169,8 @@ async function main(): Promise<void> {
     identifier: account.did,
     password,
   });
+  // Entries must be written before fireBackfill — it reads them back via
+  // listAll(ENTRY) and silently posts nothing if they're absent.
   await repo.applyCreates(rcapeRecords);
   console.log(`  wrote ${rcapeRecords.length} records`);
   const result = await fireBackfill(repo);
@@ -155,15 +178,16 @@ async function main(): Promise<void> {
     `  backfill: ${result.published} published, ${result.failed.length} failed`,
   );
 
+  // highWater is the max recapSequenceNumber from the CL snapshot at provision
+  // time, not the live repo; if result.failed is non-empty it may be ahead of
+  // what was actually posted (those rkeys are recorded in backfillFailed).
   const sorted = [...mapped.entryRecords].sort((a, b) =>
     (a.recapSequenceNumber ?? "").localeCompare(b.recapSequenceNumber ?? ""),
   );
   ledger = recordCase(ledger, docketId, {
-    did: account.did,
-    handle: account.handle,
-    password,
-    createdAt: new Date().toISOString(),
+    ...entry,
     highWater: sorted[sorted.length - 1]?.recapSequenceNumber,
+    backfillFailed: result.failed.length > 0 ? result.failed : undefined,
   });
   await saveLedger(path, ledger);
   console.log(`done — @${handle} provisioned and recorded in the ledger.`);

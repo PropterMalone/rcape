@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DAILY_CAP,
   type Ledger,
   chargeQuota,
   emptyLedger,
@@ -32,6 +33,45 @@ describe("findCase / recordCase", () => {
     recordCase(l0, 1, { did: "d", handle: "h", password: "p", createdAt: DAY });
     expect(findCase(l0, 1)).toBeUndefined();
   });
+
+  it("archives the prior account when a different DID is recorded (--force)", () => {
+    let l = recordCase(emptyLedger(), 1, {
+      did: "did:plc:first",
+      handle: "smith.rcape.org",
+      password: "pw-first",
+      createdAt: DAY,
+    });
+    l = recordCase(l, 1, {
+      did: "did:plc:second",
+      handle: "smith-2.rcape.org",
+      password: "pw-second",
+      createdAt: DAY,
+    });
+    const found = findCase(l, 1);
+    expect(found?.did).toBe("did:plc:second");
+    // the displaced account's credentials survive — never silently dropped
+    expect(found?.superseded?.[0]?.did).toBe("did:plc:first");
+    expect(found?.superseded?.[0]?.password).toBe("pw-first");
+  });
+
+  it("updates in place on a same-DID write without archiving", () => {
+    let l = recordCase(emptyLedger(), 1, {
+      did: "did:plc:x",
+      handle: "h",
+      password: "pw",
+      createdAt: DAY,
+    });
+    l = recordCase(l, 1, {
+      did: "did:plc:x",
+      handle: "h",
+      password: "pw",
+      createdAt: DAY,
+      highWater: "099",
+    });
+    const found = findCase(l, 1);
+    expect(found?.highWater).toBe("099");
+    expect(found?.superseded).toBeUndefined();
+  });
 });
 
 describe("quota (5/min self-throttle aside, 125/day cap)", () => {
@@ -60,5 +100,17 @@ describe("quota (5/min self-throttle aside, 125/day cap)", () => {
     let l: Ledger = emptyLedger();
     l = chargeQuota(l, 200, DAY);
     expect(quotaRemaining(l, DAY)).toBe(0);
+  });
+
+  it("accumulates multiple charges on the same new day after a rollover", () => {
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 50, DAY);
+    expect(quotaRemaining(l, DAY)).toBe(75);
+    // New day: the prior day's count is dropped, then same-day charges add up.
+    l = chargeQuota(l, 10, "2026-05-31");
+    l = chargeQuota(l, 7, "2026-05-31");
+    expect(quotaRemaining(l, "2026-05-31")).toBe(DAILY_CAP - 17);
+    // The prior day no longer governs the counter.
+    expect(quotaRemaining(l, DAY)).toBe(DAILY_CAP);
   });
 });

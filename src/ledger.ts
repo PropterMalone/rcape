@@ -14,6 +14,13 @@ export interface CaseEntry {
   createdAt: string;
   // High-water recapSequenceNumber for the (future) watched-case monitor.
   highWater?: string;
+  // rkeys whose backdated doc-post failed during backfill — entries that exist
+  // as records but have no companion post yet (repair target).
+  backfillFailed?: string[];
+  // Prior accounts displaced by a --force re-provision of the same docket. Kept
+  // so a superseded account's credentials are never silently lost (the ledger
+  // is the only credential store).
+  superseded?: CaseEntry[];
 }
 
 export interface Ledger {
@@ -40,9 +47,21 @@ export function recordCase(
   docketId: number,
   entry: CaseEntry,
 ): Ledger {
+  const prior = ledger.cases[String(docketId)];
+  let toStore = entry;
+  if (prior && prior.did !== entry.did) {
+    // Different DID at the same docket = a --force re-provision displaced the
+    // old account. Archive it (flattened) so its credentials survive.
+    const { superseded: priorArchive, ...priorRest } = prior;
+    toStore = { ...entry, superseded: [...(priorArchive ?? []), priorRest] };
+  } else if (prior?.superseded && !entry.superseded) {
+    // Same DID = an in-place update (e.g. the post-backfill highWater write).
+    // Preserve any existing archive across the update.
+    toStore = { ...entry, superseded: prior.superseded };
+  }
   return {
     ...ledger,
-    cases: { ...ledger.cases, [String(docketId)]: entry },
+    cases: { ...ledger.cases, [String(docketId)]: toStore },
   };
 }
 
