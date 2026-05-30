@@ -20,7 +20,11 @@ export class CourtListenerClient {
   private lastRequestAt = 0;
   private _requestCount = 0;
 
-  /** Logical CL requests issued (for quota accounting); excludes 429 retries. */
+  /**
+   * Raw CL API calls issued — one per get(), including each pagination page;
+   * excludes 429 retries. CourtListener's 125/day cap counts raw calls, so this
+   * is the right figure for quota accounting.
+   */
   get requestCount(): number {
     return this._requestCount;
   }

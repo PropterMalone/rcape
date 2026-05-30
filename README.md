@@ -29,7 +29,22 @@ Requirements: Node 22+, a self-hosted [atproto PDS](https://github.com/bluesky-s
 
 ```sh
 npm install
-cp .env.example .env        # fill in token, PDS host, case account creds
+cp .env.example .env        # fill in CL token, PDS host + admin password, handle domain, Cloudflare token
+```
+
+**Provision a case end-to-end** (mint account -> DNS -> records -> backdated posts), deduped and quota-aware:
+
+```sh
+npm run provision -- <courtlistener-docket-id|docket-url>            # do it
+npm run provision -- <docket-id> --dry-run                          # preview only (still queries CourtListener, so it burns quota)
+npm run provision -- <docket-id> --force                            # re-provision (mints a second account; the prior is archived in the ledger)
+```
+
+Provisioned cases and their per-case credentials are recorded in `data/ledger.json`, which also tracks the shared CourtListener daily-quota counter (125/day).
+
+**Or run the lower-level steps by hand** (operate a single account set via `RCAPE_CASE_DID`/`RCAPE_CASE_PASSWORD`):
+
+```sh
 npm run build:repo          # pull a docket from CourtListener -> signed CAR + web view
 npm run verify:repo         # round-trip the CAR (lists records = the browse view)
 npm run publish:records     # write the org.rcape.* records to the live PDS
