@@ -6,6 +6,7 @@
 // NOT part of the backfill. `fireBackfill` is the callable core (also used by the
 // provisioner); the CLI adds a `--dry-run` preview and `--force` override.
 
+import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, entryToPost, truncate } from "./companionPost.js";
 import type { DocketEntryRecord, DocketRecord, PostRef } from "./map.js";
@@ -190,7 +191,9 @@ async function main(): Promise<void> {
   await fireBackfill(repo, { force });
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}

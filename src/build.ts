@@ -3,6 +3,7 @@
 // bounded document subset, build the signed repo + CAR, and emit a web view.
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { CourtListenerClient } from "./courtlistener.js";
 import { hashDocuments } from "./hash.js";
 import {
@@ -135,7 +136,9 @@ async function main(): Promise<void> {
   await build({ docketId, token, hashFirstNEntries: hashN, outDir: "data" });
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}

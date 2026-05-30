@@ -21,9 +21,9 @@ describe("slugify", () => {
 
 describe("deriveHandle", () => {
   it("uses the plaintiff (pre-'v.') and matches the live handle", () => {
-    expect(deriveHandle("Abrego Garcia v. Noem", "8:25-cv-00951", "rcape.org")).toBe(
-      "abrego-garcia.rcape.org",
-    );
+    expect(
+      deriveHandle("Abrego Garcia v. Noem", "8:25-cv-00951", "rcape.org"),
+    ).toBe("abrego-garcia.rcape.org");
   });
 
   it("handles ' vs ' and ' v ' separators", () => {

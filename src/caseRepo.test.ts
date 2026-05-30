@@ -4,7 +4,10 @@ import { CaseRepo, type RepoClient } from "./caseRepo.js";
 type Write = { $type: string; collection: string; rkey: string };
 
 function mockClient(
-  pages: { records: { uri: string; cid: string; value: unknown }[]; cursor?: string }[],
+  pages: {
+    records: { uri: string; cid: string; value: unknown }[];
+    cursor?: string;
+  }[],
 ): {
   client: RepoClient;
   writes: Write[][];

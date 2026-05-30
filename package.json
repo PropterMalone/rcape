@@ -18,6 +18,7 @@
     "stage:posts": "node --import tsx src/stage-posts.ts",
     "takedown": "node --env-file=.env --import tsx src/takedown.ts",
     "fire": "node --env-file=.env --import tsx src/fire.ts",
+    "provision": "node --env-file=.env --import tsx src/provisionCase.ts",
     "validate": "biome check . && tsc --noEmit && vitest run && knip"
   },
   "dependencies": {

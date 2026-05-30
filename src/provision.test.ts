@@ -52,9 +52,10 @@ describe("createCaseAccount", () => {
     });
     // invite created with Basic admin auth
     expect(calls.invite).toHaveLength(1);
-    expect((calls.invite[0] as { headers: Record<string, string> }).headers.authorization).toMatch(
-      /^Basic /,
-    );
+    expect(
+      (calls.invite[0] as { headers: Record<string, string> }).headers
+        .authorization,
+    ).toMatch(/^Basic /);
     // account created with the issued invite code
     expect(calls.account[0]).toMatchObject({
       handle: "smith.rcape.org",

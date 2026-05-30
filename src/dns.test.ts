@@ -46,7 +46,8 @@ describe("upsertAtprotoTxt", () => {
     const calls: { url: string; method?: string }[] = [];
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, method: init?.method });
-      if (init?.method === "PUT") return res(200, { success: true, result: {} });
+      if (init?.method === "PUT")
+        return res(200, { success: true, result: {} });
       return res(200, { success: true, result: [{ id: "rec9" }] });
     });
 
@@ -57,9 +58,9 @@ describe("upsertAtprotoTxt", () => {
     });
 
     expect(out).toEqual({ created: false });
-    expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/rec9"))).toBe(
-      true,
-    );
+    expect(
+      calls.some((c) => c.method === "PUT" && c.url.endsWith("/rec9")),
+    ).toBe(true);
   });
 
   it("throws on a Cloudflare error response", async () => {

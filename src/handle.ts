@@ -10,7 +10,7 @@ const CASE_SEPARATOR = /\s+vs?\.?\s+/i;
 export function slugify(s: string): string {
   return s
     .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\p{Diacritic}/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");

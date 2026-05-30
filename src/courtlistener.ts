@@ -18,6 +18,12 @@ const sleep = (ms: number): Promise<void> =>
 
 export class CourtListenerClient {
   private lastRequestAt = 0;
+  private _requestCount = 0;
+
+  /** Logical CL requests issued (for quota accounting); excludes 429 retries. */
+  get requestCount(): number {
+    return this._requestCount;
+  }
 
   constructor(
     private readonly token: string,
@@ -34,6 +40,7 @@ export class CourtListenerClient {
 
   private async get<T>(path: string): Promise<T> {
     const url = path.startsWith("http") ? path : `${BASE}${path}`;
+    this._requestCount += 1;
     for (let attempt = 0; attempt < 5; attempt++) {
       await this.throttle();
       const res = await this.fetchImpl(url, {
