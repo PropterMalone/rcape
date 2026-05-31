@@ -87,27 +87,53 @@ async function main(): Promise<void> {
     console.warn(`  no avatar set: ${e instanceof Error ? e.message : e}`);
   }
 
-  const seed = await repo.createRecord(POST, {
-    $type: POST,
-    text: INTRO,
-    createdAt: now,
-    labels: BOT_SELF_LABEL,
-  });
+  // On a re-run the account already has a pinned intro; posting a fresh one each
+  // time would litter the timeline with duplicate intros. Reuse the existing
+  // pinned post if present, and only mint a new intro on first init.
+  let pinned: { uri: string; cid: string } | undefined;
+  try {
+    const profile = (await repo.getRecord(PROFILE, "self")) as {
+      pinnedPost?: { uri: string; cid: string };
+    };
+    pinned = profile.pinnedPost;
+  } catch {
+    // No profile yet (first init): pinned stays undefined → post a fresh intro.
+  }
+  if (pinned) {
+    console.warn(
+      "  profile already has a pinned intro — reusing it (not posting a duplicate)",
+    );
+  } else {
+    const seed = await repo.createRecord(POST, {
+      $type: POST,
+      text: INTRO,
+      createdAt: now,
+      labels: BOT_SELF_LABEL,
+    });
+    pinned = { uri: seed.uri, cid: seed.cid };
+  }
   await repo.putRecord(PROFILE, "self", {
     $type: PROFILE,
     displayName: "R.C. Ape — the Librarian",
     description: BIO,
     ...(avatar ? { avatar } : {}),
     labels: BOT_SELF_LABEL,
-    pinnedPost: { uri: seed.uri, cid: seed.cid },
+    pinnedPost: pinned,
     createdAt: now,
   });
   console.log("  profile + pinned intro set");
 
   if (minted) {
+    // The password is printed once, here, to stdout — which under systemd is
+    // captured by journald. If this init ran on a host whose journal is shared
+    // or readable by others, rotate the bot password after saving it to .env.
     console.log("\nAdd these to .env (the password is shown once):");
     console.log(`RCAPE_BOT_DID=${did}`);
     console.log(`RCAPE_BOT_PASSWORD=${password}`);
+    console.log(
+      "\nNOTE: this password was printed to stdout (journald captures it under" +
+        " systemd). Rotate it if this host's journal is shared.",
+    );
   }
   console.log(
     `\ndone — @${handle} is live. Set RCAPE_OWNER_HANDLE, then run: npm run bot`,

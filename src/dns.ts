@@ -56,6 +56,10 @@ export async function upsertAtprotoTxt(
   const existing = await cf<{ id: string }[]>(
     fetchImpl,
     "GET",
+    // name[exact] (not the default substring match): a plain `name=` filter
+    // would also return records whose name merely CONTAINS this one (e.g. a
+    // sibling subdomain), so we'd risk updating/deleting the wrong record. We
+    // want the single record for exactly _atproto.<handle>.
     `/zones/${opts.zoneId}/dns_records?type=TXT&name[exact]=${encodeURIComponent(name)}`,
     opts.token,
   );
