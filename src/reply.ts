@@ -62,8 +62,10 @@ export function buildReply(r: ReplyKind): string {
       text = `Ook. For now the Librarian admits requests only from those @${OWNER_DISPLAY_HANDLE} follows, or who follow @${OWNER_DISPLAY_HANDLE}. Ask there for a card.`;
       break;
     case "no-docket":
+      // Acknowledge the mention (the requester knows I heard them), then ask for
+      // the missing docket — not a bare broadcast of instructions.
       text =
-        "Ook? Point me at a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
+        "Ook? I hear you, but I couldn't find a docket in that. Point me at a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
       break;
     case "not-found":
       text =

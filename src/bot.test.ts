@@ -48,6 +48,20 @@ describe("classify", () => {
     });
   });
 
+  it("prefers reply-exists over skip when both provisioned AND queued", () => {
+    // A docket can be both already provisioned (in the ledger) and have a stale
+    // queued job; the existing handle is the useful answer, so exists wins.
+    expect(
+      classify({
+        ...base,
+        allowed: true,
+        existingHandle: "y.rcape.org",
+        existingDid: "did:y",
+        alreadyQueued: true,
+      }),
+    ).toEqual({ kind: "reply-exists", handle: "y.rcape.org", did: "did:y" });
+  });
+
   it("acks + enqueues a fresh request with quota available", () => {
     expect(classify({ ...base, allowed: true })).toEqual({
       kind: "ack-enqueue",
@@ -83,6 +97,7 @@ function mockAgent(mentions: MentionNotif[]) {
     text: string;
     facets?: import("./facet.js").MentionFacet[];
   }[] = [];
+  const seenAts: string[] = [];
   const agent: BotAgent = {
     did: "did:bot",
     graph: allowGraph(["did:alice"]),
@@ -91,8 +106,11 @@ function mockAgent(mentions: MentionNotif[]) {
       replies.push({ parent, text, facets });
       return { uri: `reply-${replies.length}`, cid: `c${replies.length}` };
     },
+    updateSeen: async (seenAt) => {
+      seenAts.push(seenAt);
+    },
   };
-  return { agent, replies };
+  return { agent, replies, seenAts };
 }
 
 const provisionStub = async (): Promise<ProvisionResult> => ({
@@ -604,6 +622,84 @@ describe("transient-failure retry with backoff", () => {
       expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
     } finally {
       vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("drain branches", () => {
+  it("a not-found result fails the job and posts no done/provisioned reply", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => ({
+          status: "not-found",
+        }),
+      };
+
+      await pollOnce(deps);
+
+      const q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("failed");
+      // No done/provisioned reply; a not-found reply was posted instead.
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(
+        false,
+      );
+      expect(replies.some((r) => r.text.includes("No such docket"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a quota-exhausted result stops drain and leaves the job queued for the next cycle", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          // First drain hits the budget; the second (next cycle) succeeds.
+          return attempts === 1
+            ? { status: "quota-exhausted", day: "2026-05-31" }
+            : provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      // Drain stopped on quota-exhausted: the job is still queued (not failed),
+      // and no done/provisioned reply went out.
+      let q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("queued");
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(
+        false,
+      );
+
+      // Next cycle (budget restored): the still-queued job drains and completes.
+      await pollOnce(deps);
+      q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("done");
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+    } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });

@@ -53,6 +53,9 @@ export interface BotAgent {
     text: string,
     facets?: MentionFacet[],
   ): Promise<StrongRef>;
+  // Mark notifications up to `seenAt` as read, so the bot account's unread badge
+  // clears and the next listNotifications can rely on the server's seen marker.
+  updateSeen(seenAt: string): Promise<void>;
 }
 
 function toMention(n: RawNotification): MentionNotif {
@@ -143,6 +146,9 @@ export async function createBotAgent(opts: {
         },
       });
       return { uri: res.data.uri, cid: res.data.cid };
+    },
+    async updateSeen(seenAt): Promise<void> {
+      await agent.app.bsky.notification.updateSeen({ seenAt });
     },
   };
 }

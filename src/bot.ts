@@ -32,12 +32,19 @@ import {
   mutateQueue,
   nextDrainable,
   perRequesterQueued,
+  sanitizeHandle,
   setAck,
 } from "./queue.js";
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
 
-// A case is ~17 CL calls; require a little headroom before starting one.
+// A full case fetch is ~17 CL calls (docket + entry/party pages). Require 20 —
+// a small headroom over the worst case — before STARTING one, so a case can't
+// begin, exhaust the shared 125/day budget partway, and strand itself
+// half-provisioned. Drain re-checks this before each job.
 const MIN_QUOTA_FOR_CASE = 20;
+// Max in-flight (queued/retrying) requests per requester. Bounds how much of the
+// shared daily budget any single allowlisted account can reserve at once (3 ×
+// ~17 = ~51 calls), so one user can't monopolize the queue or the quota.
 const PER_REQUESTER_CAP = 3;
 
 // Transient provision errors back off and retry rather than failing outright:
@@ -135,6 +142,9 @@ function replyFacets(
 export async function pollOnce(deps: BotDeps): Promise<void> {
   const provision = deps.provision ?? ((id, cfg) => runProvision(id, cfg));
   let queue = await loadQueue(deps.queuePath);
+  // Stamp the cycle start: everything listed below was indexed at or before now,
+  // so this is a safe seenAt to clear the unread badge with after the cycle.
+  const cycleStart = new Date().toISOString();
   // Paginate until we reach an already-processed notification, so a burst of
   // likes/follows can't scroll real mentions off page 1 and drop them.
   const mentions = await deps.agent.listMentions({
@@ -167,7 +177,9 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       const job: Job = {
         docketId: action.docketId,
         requesterDid: m.authorDid,
-        requesterHandle: m.authorHandle,
+        // Sanitize the handle from the (untrusted) notification before storing:
+        // it lands in logs and reply copy.
+        requesterHandle: sanitizeHandle(m.authorHandle),
         mention: parent,
         rootRef: m.root,
         status: "queued",
@@ -214,10 +226,30 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         );
         continue;
       }
+    } else if (action.kind === "skip") {
+      // Docket already queued (a duplicate mention while it's in flight): the
+      // original ack/queued reply stands, so just mark seen below — no reply.
+    } else {
+      // Exhaustiveness guard: a new Action kind without a branch here is a
+      // compile error, not a silent fall-through to "mark seen, no reply".
+      const _exhaustive: never = action;
+      void _exhaustive;
     }
 
     queue = markSeen(queue, m.uri);
     await persistQueue(deps.queuePath, queue);
+  }
+
+  // Clear the account's unread notification badge for everything up to this
+  // cycle's start. Best-effort: it's cosmetic (the queue's `seen` set is the
+  // authoritative dedupe), so a failure here must not abort the cycle.
+  try {
+    await deps.agent.updateSeen(cycleStart);
+  } catch (e) {
+    console.error(
+      "updateSeen failed:",
+      e instanceof Error ? e.message : String(e),
+    );
   }
 
   await drain(deps, provision);

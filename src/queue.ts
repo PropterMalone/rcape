@@ -36,6 +36,22 @@ export interface QueueState {
 }
 
 const SEEN_CAP = 1000;
+// atproto handle max length; we store requesterHandle for display in replies and
+// logs, so cap it and strip control/whitespace chars a malformed notification
+// could carry (a handle never contains whitespace) to avoid log/copy injection.
+const HANDLE_MAX = 253;
+
+export function sanitizeHandle(handle: string): string {
+  // Drop whitespace + ASCII control chars (codepoint <= 0x20 or == 0x7f) a
+  // malformed notification could carry — a handle never contains them — then cap.
+  let out = "";
+  for (const ch of handle) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x20 || code === 0x7f) continue;
+    out += ch;
+  }
+  return out.slice(0, HANDLE_MAX);
+}
 
 export function emptyQueue(): QueueState {
   return { jobs: [], seen: [] };
@@ -93,14 +109,21 @@ export function nextDrainable(q: QueueState, now: number): Job | undefined {
   });
 }
 
+// Patch the ACTIVE job for a docket — the queued/retrying one. A docket can have
+// a prior terminal job (re-requested after the first completed) sharing its id;
+// matching by docketId alone would mutate the stale terminal job too (e.g. an
+// ack landing on a done job). enqueue guarantees at most one active job per
+// docket, so this targets exactly one.
 function patchJob(
   q: QueueState,
   docketId: number,
   patch: Partial<Job>,
 ): QueueState {
+  const target = q.jobs.find((j) => j.docketId === docketId && isActive(j));
+  if (!target) return q;
   return {
     ...q,
-    jobs: q.jobs.map((j) => (j.docketId === docketId ? { ...j, ...patch } : j)),
+    jobs: q.jobs.map((j) => (j === target ? { ...j, ...patch } : j)),
   };
 }
 
@@ -128,7 +151,9 @@ export function markRetrying(
   docketId: number,
   nextAttemptAt: string,
 ): QueueState {
-  const job = findJob(q, docketId);
+  // Read retryCount off the ACTIVE job (the one being backed off), not a stale
+  // terminal same-docket job findJob might return first.
+  const job = q.jobs.find((j) => j.docketId === docketId && isActive(j));
   const retryCount = (job?.retryCount ?? 0) + 1;
   return patchJob(q, docketId, {
     status: "retrying",
