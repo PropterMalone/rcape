@@ -21,5 +21,17 @@ Restart=always
 RestartSec=10
 # The poll loop is resilient to transient errors; restart covers crashes/reboots.
 
+# Sandbox hardening. The bot only needs to write its durable stores under data/.
+# ProtectSystem=strict mounts the whole filesystem read-only except the paths in
+# ReadWritePaths, so a compromised process can't tamper with the host or the
+# checkout's code. PrivateTmp gives an isolated /tmp; NoNewPrivileges blocks
+# setuid/capability escalation. npm's cache/logs are redirected into the
+# PrivateTmp so they don't need write access to $HOME (which strict makes RO).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/rcape/data
+Environment=npm_config_cache=/tmp/.npm npm_config_update_notifier=false
+
 [Install]
 WantedBy=multi-user.target

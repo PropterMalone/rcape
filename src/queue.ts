@@ -32,7 +32,11 @@ export interface Job {
 
 export interface QueueState {
   jobs: Job[];
-  seen: string[]; // processed notification URIs (bounded)
+  // Processed notification URIs (bounded), as an in-memory Set so membership is
+  // O(1) — serialized to/from a plain array at the load/save boundary, since
+  // JSON has no Set type. insertionOrder is preserved, so slicing the most
+  // recent (the SEEN_CAP bound) stays correct.
+  seen: Set<string>;
 }
 
 const SEEN_CAP = 1000;
@@ -54,7 +58,7 @@ export function sanitizeHandle(handle: string): string {
 }
 
 export function emptyQueue(): QueueState {
-  return { jobs: [], seen: [] };
+  return { jobs: [], seen: new Set() };
 }
 
 export function findJob(q: QueueState, docketId: number): Job | undefined {
@@ -163,36 +167,52 @@ export function markRetrying(
 }
 
 export function hasSeen(q: QueueState, uri: string): boolean {
-  return q.seen.includes(uri);
+  return q.seen.has(uri);
 }
 
 export function markSeen(q: QueueState, uri: string): QueueState {
-  if (q.seen.includes(uri)) return q;
-  const seen = [...q.seen, uri];
-  // Bound the set so it can't grow without limit; keep the most recent.
-  return { ...q, seen: seen.slice(-SEEN_CAP) };
+  if (q.seen.has(uri)) return q;
+  // Bound the set so it can't grow without limit; keep the most recent. A Set
+  // preserves insertion order, so the tail slice is the newest SEEN_CAP URIs.
+  const next = [...q.seen, uri].slice(-SEEN_CAP);
+  return { ...q, seen: new Set(next) };
 }
 
-function normalize(parsed: Partial<QueueState>): QueueState {
-  return { jobs: parsed.jobs ?? [], seen: parsed.seen ?? [] };
+// The on-disk shape: identical to QueueState but with `seen` as a plain array,
+// since JSON has no Set. normalize/serialize bridge this and the in-memory form.
+interface StoredQueue {
+  jobs: Job[];
+  seen: string[];
+}
+
+function normalize(parsed: Partial<StoredQueue>): QueueState {
+  return { jobs: parsed.jobs ?? [], seen: new Set(parsed.seen ?? []) };
+}
+
+function serialize(q: QueueState): StoredQueue {
+  return { jobs: q.jobs, seen: [...q.seen] };
 }
 
 export async function loadQueue(path: string): Promise<QueueState> {
-  return normalize(await loadJson<Partial<QueueState>>(path, emptyQueue));
+  return normalize(await loadJson<Partial<StoredQueue>>(path, () => ({})));
 }
 
 export async function saveQueue(path: string, q: QueueState): Promise<void> {
-  await saveJson(path, q);
+  await saveJson(path, serialize(q));
 }
 
 // Cross-process-safe read-modify-write of the queue: re-reads under an advisory
 // lock, applies `mutate`, and saves atomically. `mutate` receives the freshly
-// re-read queue so a concurrent writer's change isn't lost.
+// re-read queue so a concurrent writer's change isn't lost. The mutate runs on
+// the in-memory (Set-backed) form; the stored form is serialized on save.
 export async function mutateQueue(
   path: string,
   mutate: (q: QueueState) => QueueState | Promise<QueueState>,
 ): Promise<QueueState> {
-  return mutateJson<QueueState>(path, emptyQueue, async (parsed) =>
-    mutate(normalize(parsed)),
+  const stored = await mutateJson<StoredQueue>(
+    path,
+    () => ({ jobs: [], seen: [] }),
+    async (parsed) => serialize(await mutate(normalize(parsed))),
   );
+  return normalize(stored);
 }

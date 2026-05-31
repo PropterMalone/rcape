@@ -113,6 +113,10 @@ export async function createBotAgent(opts: {
 
   return {
     did,
+    // Double-cast: AtpAgent structurally provides the app.bsky.graph.* methods
+    // GraphClient names, but its full type is far wider, so TS won't narrow it
+    // directly. The cast is sound at runtime (the methods exist); GraphClient is
+    // the minimal seam tests mock against.
     graph: agent as unknown as GraphClient,
     async listMentions(opts): Promise<MentionNotif[]> {
       return paginateMentions(async (cursor) => {

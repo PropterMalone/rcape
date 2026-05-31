@@ -40,7 +40,10 @@ export function buildReply(r: ReplyKind): string {
       text = `Ook. Fetching CourtListener docket ${r.docketId} into the stacks — I'll reply here once it's shelved.`;
       break;
     case "queued":
-      text = `Ook. Docket ${r.docketId} is in the queue (~${r.ahead} ahead). I shelve cases as the daily archive budget allows; I'll reply here when it's done.`;
+      // `ahead` is the current queue DEPTH (count of waiting cases), an estimate
+      // of how many sit before this one — not a guaranteed position, since drain
+      // order and the daily budget shift it. Phrased as "~N waiting" accordingly.
+      text = `Ook. Docket ${r.docketId} is in the queue (~${r.ahead} ${r.ahead === 1 ? "case" : "cases"} waiting). I shelve cases as the daily archive budget allows; I'll reply here when it's done.`;
       break;
     case "provisioned": {
       // The @handle is the load-bearing payload; the partial-failure note is

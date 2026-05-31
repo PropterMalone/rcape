@@ -57,7 +57,9 @@ npm run takedown -- --entry <rkey> --reason "<basis>"   # remove a filing + its 
 
 ## Status
 
-Proof of concept — one case live. Next: the **R.C. Ape** by-request bot (mention it with a case → it provisions a per-case repo) and a watched-case auto-monitor (polls for new filings, appends them, and honors upstream seals).
+The **R.C. Ape** by-request bot is shipped: mention [@ape.rcape.org](https://bsky.app/profile/ape.rcape.org) with a CourtListener docket (a link or its id) and it provisions a per-case repo, replying when the case is shelved. Requests are admitted from accounts [@proptermalone](https://bsky.app/profile/proptermalone.bsky.social) follows or who follow them, and drained under the shared CourtListener daily budget.
+
+Next: a watched-case auto-monitor (polls provisioned cases for new filings, appends them, and honors upstream seals).
 
 ## Disclaimer
 

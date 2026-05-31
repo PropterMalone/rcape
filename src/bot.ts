@@ -301,6 +301,11 @@ async function drain(
       continue;
     }
 
+    // Re-read the ledger every iteration (asymmetric with the queue, loaded once
+    // above): runProvision charges the shared CL quota under the lock as it runs,
+    // so each job must see the freshly-spent count to honor the budget. The queue
+    // is the bot's own single-writer in-memory authority, so re-reading it per
+    // iteration would just re-load what we already hold.
     const ledger = await loadLedger(deps.cfg.ledgerPath);
     if (quotaRemaining(ledger, today()) < MIN_QUOTA_FOR_CASE) break; // resume after reset
 

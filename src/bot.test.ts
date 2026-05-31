@@ -309,7 +309,7 @@ describe("pollOnce", () => {
       );
       const q1 = await loadQueue(queuePath);
       expect(q1.jobs[0]?.status).toBe("done");
-      expect(q1.seen).toContain("m-alice");
+      expect(q1.seen.has("m-alice")).toBe(true);
 
       // second cycle: alice's mention is already seen → no new replies.
       await pollOnce(deps);
@@ -342,7 +342,7 @@ describe("over-cap requester", () => {
       });
       await saveQueue(queuePath, {
         jobs: [queued(11111111), queued(22222222), queued(33333333)],
-        seen: [],
+        seen: new Set(),
       });
 
       // alice mentions a fourth, distinct docket → over her cap.
@@ -371,7 +371,7 @@ describe("over-cap requester", () => {
       expect(overCap).toBeDefined();
       expect(overCap?.text).toContain("3"); // surfaces the in-flight count
       const q = await loadQueue(queuePath);
-      expect(q.seen).toContain("m-alice-4");
+      expect(q.seen.has("m-alice-4")).toBe(true);
       // No new job was enqueued for the fourth docket.
       expect(findJob(q, 44444444)).toBeUndefined();
     } finally {
