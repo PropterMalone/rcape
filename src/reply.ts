@@ -23,7 +23,10 @@ export type ReplyKind =
   | { kind: "exists"; handle: string }
   | { kind: "declined" }
   | { kind: "no-docket" }
-  | { kind: "not-found" };
+  | { kind: "not-found" }
+  // Posted only after retries are exhausted, so the requester isn't left in
+  // permanent silence after the ack.
+  | { kind: "failed"; docketId: number };
 
 export function buildReply(r: ReplyKind): string {
   let text: string;
@@ -50,6 +53,9 @@ export function buildReply(r: ReplyKind): string {
     case "not-found":
       text =
         "Ook. No such docket in CourtListener's stacks. Double-check the id or link?";
+      break;
+    case "failed":
+      text = `Ook. I couldn't shelve docket ${r.docketId} — the stacks gave way after a few tries. Mention me again later and I'll have another go.`;
       break;
   }
   return truncate(text, MAX_POST);

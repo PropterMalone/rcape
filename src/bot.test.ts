@@ -7,7 +7,7 @@ import { type BotDeps, classify } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
 import { emptyLedger, saveLedger } from "./ledger.js";
 import type { ProvisionConfig, ProvisionResult } from "./provisionCase.js";
-import { type StrongRef, loadQueue } from "./queue.js";
+import { type StrongRef, findJob, loadQueue } from "./queue.js";
 
 describe("classify", () => {
   const docket = { docketId: 69777799 } as const;
@@ -367,6 +367,177 @@ describe("drain-time allowlist re-check", () => {
       const q = await loadQueue(queuePath);
       expect(q.jobs[0]?.status).not.toBe("queued");
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function baseCfg(ledgerPath: string): ProvisionConfig {
+  return {
+    token: "t",
+    domain: "rcape.org",
+    hashN: 0,
+    adminPassword: "",
+    cfToken: "",
+    zoneId: "",
+    ledgerPath,
+  } as ProvisionConfig;
+}
+
+describe("transient-failure retry with backoff", () => {
+  it("backs off a transient error and re-drains on a later cycle (not abandoned)", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        // Fail the first attempt transiently, succeed on the retry.
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return attempts === 1
+            ? { status: "error", message: "transient PDS blip" }
+            : provisionStub();
+        },
+      };
+
+      // Cycle 1: ack + a transient error → job set to retrying, no failure reply.
+      await pollOnce(deps);
+      expect(attempts).toBe(1);
+      let q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("retrying");
+      expect(q.jobs[0]?.retryCount).toBe(1);
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(
+        false,
+      );
+
+      // A poll before the backoff elapses must NOT re-attempt.
+      await pollOnce(deps);
+      expect(attempts).toBe(1);
+
+      // After the backoff window, the retry runs and succeeds.
+      vi.advanceTimersByTime(61_000);
+      await pollOnce(deps);
+      expect(attempts).toBe(2);
+      q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("done");
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("posts an apologetic failure reply once retries are exhausted", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return { status: "error", message: "always fails" };
+        },
+      };
+
+      // Drive enough cycles past each backoff to exhaust the retries.
+      await pollOnce(deps); // attempt 1 → retrying
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(60 * 60_000); // jump past the longest backoff
+        await pollOnce(deps);
+      }
+
+      const q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("failed");
+      // 1 initial + 3 retries = 4 provision attempts before failing for good.
+      expect(attempts).toBe(4);
+      // The requester gets exactly one apologetic failure reply.
+      const failReplies = replies.filter((r) =>
+        r.text.includes("couldn't shelve"),
+      );
+      expect(failReplies).toHaveLength(1);
+      expect(failReplies[0]?.text).toContain("69777799");
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a future-dated retrying job does not starve a ready job behind it", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      // Two allowlisted requesters: bob's docket always fails (→ retrying), and
+      // carol's docket (mentioned after) must still drain.
+      const bob: MentionNotif = {
+        uri: "m-bob",
+        cid: "cb",
+        authorDid: "did:bob",
+        authorHandle: "bob.test",
+        text: "@ape.rcape.org add https://www.courtlistener.com/docket/11111111/x/",
+        root: { uri: "m-bob", cid: "cb" },
+      };
+      const carol: MentionNotif = {
+        uri: "m-carol",
+        cid: "cc",
+        authorDid: "did:carol",
+        authorHandle: "carol.test",
+        text: "@ape.rcape.org add https://www.courtlistener.com/docket/22222222/x/",
+        root: { uri: "m-carol", cid: "cc" },
+      };
+      const { agent, replies } = mockAgent([bob, carol]);
+      agent.graph = allowGraph(["did:bob", "did:carol"]);
+
+      const provisioned: number[] = [];
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test", 0),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (docketId): Promise<ProvisionResult> => {
+          if (docketId === 11111111) {
+            return { status: "error", message: "bob's docket flaps" };
+          }
+          provisioned.push(docketId);
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      // bob's job is backing off (retrying), but carol's job still got drained —
+      // the stuck job did not head-of-line block the queue.
+      expect(provisioned).toContain(22222222);
+      const q = await loadQueue(queuePath);
+      expect(findJob(q, 11111111)?.status).toBe("retrying");
+      expect(findJob(q, 22222222)?.status).toBe("done");
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
       await rm(dir, { recursive: true, force: true });
     }
   });

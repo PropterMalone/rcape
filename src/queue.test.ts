@@ -12,7 +12,9 @@ import {
   loadQueue,
   markDone,
   markFailed,
+  markRetrying,
   markSeen,
+  nextDrainable,
   nextQueued,
   perRequesterQueued,
   saveQueue,
@@ -91,6 +93,48 @@ describe("lifecycle", () => {
     expect(findJob(q, 1)?.status).toBe("failed");
     expect(nextQueued(q)).toBeUndefined();
     expect(enqueue(q, job(1, "did:b"), { perRequesterCap: 3 }).ok).toBe(true);
+  });
+});
+
+describe("retry backoff", () => {
+  const NOW = Date.parse("2026-05-31T12:00:00.000Z");
+
+  it("markRetrying bumps retryCount and sets the backoff window", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = markRetrying(q, 1, new Date(NOW + 1000).toISOString());
+    const j = findJob(q, 1);
+    expect(j?.status).toBe("retrying");
+    expect(j?.retryCount).toBe(1);
+    // A second retry increments the count.
+    q = markRetrying(q, 1, new Date(NOW + 2000).toISOString());
+    expect(findJob(q, 1)?.retryCount).toBe(2);
+  });
+
+  it("nextDrainable skips a retrying job still in its backoff window", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = markRetrying(q, 1, new Date(NOW + 60_000).toISOString());
+    expect(nextDrainable(q, NOW)).toBeUndefined(); // not yet ready
+    expect(nextDrainable(q, NOW + 60_001)?.docketId).toBe(1); // ready after backoff
+  });
+
+  it("a future-dated retrying job does not head-of-line block a ready job behind it", () => {
+    let q = enq(emptyQueue(), job(1, "did:a")); // will be future-dated retrying
+    q = enq(q, job(2, "did:b")); // fresh, ready now
+    q = markRetrying(q, 1, new Date(NOW + 60_000).toISOString());
+    // docket 1 is backing off → the ready docket 2 drains first.
+    expect(nextDrainable(q, NOW)?.docketId).toBe(2);
+  });
+
+  it("counts a retrying job as active for dedupe + requester cap", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = markRetrying(q, 1, new Date(NOW + 1000).toISOString());
+    // Same docket can't be re-enqueued while it's mid-retry.
+    expect(enqueue(q, job(1, "did:b"), { perRequesterCap: 3 })).toEqual({
+      ok: false,
+      reason: "duplicate",
+    });
+    // The retrying job still counts toward its requester's cap.
+    expect(perRequesterQueued(q, "did:a")).toBe(1);
   });
 });
 

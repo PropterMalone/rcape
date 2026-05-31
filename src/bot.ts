@@ -26,8 +26,9 @@ import {
   loadQueue,
   markDone,
   markFailed,
+  markRetrying,
   markSeen,
-  nextQueued,
+  nextDrainable,
   saveQueue,
   setAck,
 } from "./queue.js";
@@ -36,6 +37,18 @@ import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
 // A case is ~17 CL calls; require a little headroom before starting one.
 const MIN_QUOTA_FOR_CASE = 20;
 const PER_REQUESTER_CAP = 3;
+
+// Transient provision errors back off and retry rather than failing outright:
+// after MAX_PROVISION_RETRIES attempts the job is failed and the requester gets
+// an apologetic reply. Backoff grows with the attempt count so a flapping PDS or
+// CL hiccup is given time to recover without head-of-line blocking the queue.
+const MAX_PROVISION_RETRIES = 3;
+const RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
+
+function backoffMs(retryCount: number): number {
+  const i = Math.min(Math.max(0, retryCount - 1), RETRY_BACKOFF_MS.length - 1);
+  return RETRY_BACKOFF_MS[i] ?? 60_000;
+}
 
 export type Action =
   | { kind: "ack-enqueue"; docketId: number }
@@ -216,7 +229,7 @@ async function drain(
 ): Promise<void> {
   let queue = await loadQueue(deps.queuePath);
   while (true) {
-    const job = nextQueued(queue);
+    const job = nextDrainable(queue, Date.now());
     if (!job) break;
 
     // Re-check the allowlist at drain time: the enqueue-time decision is cached
@@ -236,14 +249,31 @@ async function drain(
     const parent = job.ackRef ?? job.mention;
     const result = await provision(job.docketId, deps.cfg);
 
-    // Persist the terminal state (and save) BEFORE posting the reply. A crash
-    // after a completed provision but before this save would leave the job still
-    // queued, so on restart runProvision reruns, returns "exists", and fires a
-    // duplicate reply. Marking the job terminal first makes the reply at-most-once.
+    // On a transient error, decide retry-vs-fail BEFORE persisting so the
+    // terminal/backoff marker is durable before any reply. retryCount is the
+    // attempts already made; once it would exceed the cap we fail for good.
+    const willRetry =
+      result.status === "error" &&
+      (job.retryCount ?? 0) + 1 <= MAX_PROVISION_RETRIES;
+
+    // Persist the new state (and save) BEFORE posting the reply. A crash after a
+    // completed provision but before this save would leave the job still
+    // drainable, so on restart runProvision reruns, returns "exists", and fires
+    // a duplicate reply. Marking first makes the reply at-most-once.
     if (result.status === "provisioned" || result.status === "exists") {
       queue = markDone(queue, job.docketId);
-    } else if (result.status === "not-found" || result.status === "error") {
+    } else if (result.status === "not-found") {
       queue = markFailed(queue, job.docketId);
+    } else if (result.status === "error") {
+      if (willRetry) {
+        const nextRetry = (job.retryCount ?? 0) + 1;
+        const nextAt = new Date(
+          Date.now() + backoffMs(nextRetry),
+        ).toISOString();
+        queue = markRetrying(queue, job.docketId, nextAt);
+      } else {
+        queue = markFailed(queue, job.docketId);
+      }
     } else {
       // quota-exhausted: leave the job queued and resume after the daily reset.
       break;
@@ -276,12 +306,25 @@ async function drain(
         job.rootRef,
         buildReply({ kind: "not-found" }),
       );
-    } else {
-      // error — failed marker already persisted; don't spam a reply on transient
-      // errors. Log only the docket id and status, never result.message: PDS auth
-      // errors can echo credentials, and journald retains them indefinitely.
+    } else if (result.status === "error" && willRetry) {
+      // Transient error, backed off for another attempt — no reply yet. Log only
+      // the docket id and status, never result.message: PDS auth errors can echo
+      // credentials, and journald retains them indefinitely.
       console.error(
-        `provision failed for docket ${job.docketId}: ${result.status}`,
+        `provision retrying for docket ${job.docketId} (attempt ${
+          (job.retryCount ?? 0) + 1
+        }/${MAX_PROVISION_RETRIES}): ${result.status}`,
+      );
+    } else {
+      // Retries exhausted — post the apologetic failure reply so the requester
+      // isn't left in permanent silence after the ack.
+      console.error(
+        `provision failed for docket ${job.docketId} after ${MAX_PROVISION_RETRIES} retries: ${result.status}`,
+      );
+      await deps.agent.reply(
+        parent,
+        job.rootRef,
+        buildReply({ kind: "failed", docketId: job.docketId }),
       );
     }
   }
