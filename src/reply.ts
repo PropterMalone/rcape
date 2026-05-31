@@ -8,6 +8,12 @@ import { truncate } from "./companionPost.js";
 const MAX_POST = 300;
 const NAME_BUDGET = 80;
 
+// The owner's display handle as it appears in copy (the "declined" reply). The
+// facet builder matches this exact substring to attach the owner's mention
+// facet, so copy and facet map stay in sync. (Bare, not the full bsky handle —
+// it renders short; the facet's `did` is what makes it resolve + notify.)
+export const OWNER_DISPLAY_HANDLE = "proptermalone";
+
 export type ReplyKind =
   // ack/queued fire at mention time, before any CL fetch — only the docket id
   // is known then (the case name costs a quota call we haven't spent yet).
@@ -35,8 +41,7 @@ export function buildReply(r: ReplyKind): string {
       text = `Ook. Already in the stacks — that case is at @${r.handle}.`;
       break;
     case "declined":
-      text =
-        "Ook. For now the Librarian admits requests only from those @proptermalone follows, or who follow @proptermalone. Ask there for a card.";
+      text = `Ook. For now the Librarian admits requests only from those @${OWNER_DISPLAY_HANDLE} follows, or who follow @${OWNER_DISPLAY_HANDLE}. Ask there for a card.`;
       break;
     case "no-docket":
       text =

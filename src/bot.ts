@@ -6,9 +6,10 @@
 // decision function (unit-tested); `pollOnce` is one testable cycle.
 
 import { fileURLToPath } from "node:url";
-import { AllowlistCache } from "./allowlist.js";
+import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
+import { type MentionFacet, mentionFacets } from "./facet.js";
 import { findCase, loadLedger, quotaRemaining } from "./ledger.js";
 import { parseMention } from "./mention.js";
 import {
@@ -30,7 +31,7 @@ import {
   saveQueue,
   setAck,
 } from "./queue.js";
-import { buildReply } from "./reply.js";
+import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
 
 // A case is ~17 CL calls; require a little headroom before starting one.
 const MIN_QUOTA_FOR_CASE = 20;
@@ -39,7 +40,7 @@ const PER_REQUESTER_CAP = 3;
 export type Action =
   | { kind: "ack-enqueue"; docketId: number }
   | { kind: "ack-queued"; docketId: number; ahead: number }
-  | { kind: "reply-exists"; handle: string }
+  | { kind: "reply-exists"; handle: string; did?: string }
   | { kind: "reply-declined" }
   | { kind: "reply-no-docket" }
   | { kind: "skip" };
@@ -48,6 +49,7 @@ export interface ClassifyInput {
   allowed: boolean;
   parsed: ReturnType<typeof parseMention>;
   existingHandle?: string;
+  existingDid?: string;
   alreadyQueued: boolean;
   quotaOk: boolean;
   queueAhead: number;
@@ -59,7 +61,11 @@ export function classify(input: ClassifyInput): Action {
   if (!input.allowed) return { kind: "reply-declined" };
   if (!("docketId" in input.parsed)) return { kind: "reply-no-docket" };
   if (input.existingHandle) {
-    return { kind: "reply-exists", handle: input.existingHandle };
+    return {
+      kind: "reply-exists",
+      handle: input.existingHandle,
+      did: input.existingDid,
+    };
   }
   if (input.alreadyQueued) return { kind: "skip" };
   return input.quotaOk
@@ -76,6 +82,10 @@ export interface BotDeps {
   allowlist: AllowlistCache;
   cfg: ProvisionConfig;
   queuePath: string;
+  // The owner's (@proptermalone) DID, resolved once at startup, used for the
+  // mention facet in the "declined" reply. Optional: when absent, the declined
+  // reply still posts — just without the owner facet.
+  ownerDid?: string;
   provision?: (
     docketId: number,
     cfg: ProvisionConfig,
@@ -83,6 +93,21 @@ export interface BotDeps {
 }
 
 const today = (): string => new Date().toISOString().slice(0, 10);
+
+// Build mention facets for a reply's text from the handles relevant to it. Each
+// reply kind embeds at most one provisioned-case handle (→ caseDid) and/or
+// @proptermalone (→ ownerDid); mentionFacets scans the copy and emits a facet
+// for each, with correct UTF-8 byte offsets. Unknown handles produce no facet.
+function replyFacets(
+  text: string,
+  deps: BotDeps,
+  extra?: { handle: string; did: string },
+): MentionFacet[] {
+  const dids: Record<string, string> = {};
+  if (deps.ownerDid) dids[OWNER_DISPLAY_HANDLE] = deps.ownerDid;
+  if (extra) dids[extra.handle] = extra.did;
+  return mentionFacets(text, dids);
+}
 
 export async function pollOnce(deps: BotDeps): Promise<void> {
   const provision = deps.provision ?? ((id, cfg) => runProvision(id, cfg));
@@ -101,14 +126,19 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     const parent: StrongRef = { uri: m.uri, cid: m.cid };
 
     if (action.kind === "reply-declined") {
-      await deps.agent.reply(parent, m.root, buildReply({ kind: "declined" }));
+      const text = buildReply({ kind: "declined" });
+      await deps.agent.reply(parent, m.root, text, replyFacets(text, deps));
     } else if (action.kind === "reply-no-docket") {
       await deps.agent.reply(parent, m.root, buildReply({ kind: "no-docket" }));
     } else if (action.kind === "reply-exists") {
+      const text = buildReply({ kind: "exists", handle: action.handle });
       await deps.agent.reply(
         parent,
         m.root,
-        buildReply({ kind: "exists", handle: action.handle }),
+        text,
+        action.did
+          ? replyFacets(text, deps, { handle: action.handle, did: action.did })
+          : replyFacets(text, deps),
       );
     } else if (action.kind === "ack-enqueue" || action.kind === "ack-queued") {
       const job: Job = {
@@ -173,6 +203,7 @@ async function classifyMention(
     allowed,
     parsed,
     existingHandle: existing?.handle,
+    existingDid: existing?.did,
     alreadyQueued,
     quotaOk,
     queueAhead,
@@ -208,20 +239,24 @@ async function drain(
     await saveQueue(deps.queuePath, queue);
 
     if (result.status === "provisioned") {
+      const text = buildReply({
+        kind: "provisioned",
+        caseName: result.caseName,
+        handle: result.handle,
+      });
       await deps.agent.reply(
         parent,
         job.rootRef,
-        buildReply({
-          kind: "provisioned",
-          caseName: result.caseName,
-          handle: result.handle,
-        }),
+        text,
+        replyFacets(text, deps, { handle: result.handle, did: result.did }),
       );
     } else if (result.status === "exists") {
+      const text = buildReply({ kind: "exists", handle: result.handle });
       await deps.agent.reply(
         parent,
         job.rootRef,
-        buildReply({ kind: "exists", handle: result.handle }),
+        text,
+        replyFacets(text, deps, { handle: result.handle, did: result.did }),
       );
     } else if (result.status === "not-found") {
       await deps.agent.reply(
@@ -262,11 +297,19 @@ async function main(): Promise<void> {
     zoneId: env("CLOUDFLARE_ZONE_ID"),
     ledgerPath: fileURLToPath(new URL("../data/ledger.json", import.meta.url)),
   };
+  const ownerHandle = env("RCAPE_OWNER_HANDLE");
+  // Resolve the owner handle to a DID once at startup for the @proptermalone
+  // mention facet. resolveHandle is an AppView read, not a CL call (no quota).
+  const ownerDid = await resolveOwnerDid(
+    agent.graph as unknown as Parameters<typeof resolveOwnerDid>[0],
+    ownerHandle,
+  );
   const deps: BotDeps = {
     agent,
-    allowlist: new AllowlistCache(agent.graph, env("RCAPE_OWNER_HANDLE")),
+    allowlist: new AllowlistCache(agent.graph, ownerHandle),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
+    ownerDid,
   };
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");

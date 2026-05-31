@@ -25,6 +25,33 @@ export interface GraphClient {
   };
 }
 
+// Minimal slice of AtpAgent's identity API for one-time owner-handle → DID
+// resolution at startup (used for the @proptermalone mention facet).
+export interface IdentityClient {
+  com: {
+    atproto: {
+      identity: {
+        resolveHandle(params: {
+          handle: string;
+        }): Promise<{ data: { did: string } }>;
+      };
+    };
+  };
+}
+
+// Resolve the owner handle to a DID once at startup. An owner already given as a
+// DID (starts with "did:") is returned as-is.
+export async function resolveOwnerDid(
+  client: IdentityClient,
+  ownerHandle: string,
+): Promise<string> {
+  if (ownerHandle.startsWith("did:")) return ownerHandle;
+  const { data } = await client.com.atproto.identity.resolveHandle({
+    handle: ownerHandle,
+  });
+  return data.did;
+}
+
 async function collectDids(
   page: (cursor?: string) => Promise<{ dids: string[]; cursor?: string }>,
 ): Promise<string[]> {

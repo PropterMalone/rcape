@@ -7,6 +7,7 @@ import { AtpAgent } from "@atproto/api";
 import type { GraphClient } from "./allowlist.js";
 import { DEFAULT_PDS_HOST } from "./caseRepo.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
+import type { MentionFacet } from "./facet.js";
 import type { StrongRef } from "./queue.js";
 
 const POST = "app.bsky.feed.post";
@@ -46,7 +47,12 @@ export interface BotAgent {
   did: string;
   graph: GraphClient;
   listMentions(opts?: ListMentionsOpts): Promise<MentionNotif[]>;
-  reply(parent: StrongRef, root: StrongRef, text: string): Promise<StrongRef>;
+  reply(
+    parent: StrongRef,
+    root: StrongRef,
+    text: string,
+    facets?: MentionFacet[],
+  ): Promise<StrongRef>;
 }
 
 function toMention(n: RawNotification): MentionNotif {
@@ -121,7 +127,7 @@ export async function createBotAgent(opts: {
         };
       }, opts);
     },
-    async reply(parent, root, text): Promise<StrongRef> {
+    async reply(parent, root, text, facets): Promise<StrongRef> {
       const res = await agent.com.atproto.repo.createRecord({
         repo: did,
         collection: POST,
@@ -131,6 +137,9 @@ export async function createBotAgent(opts: {
           createdAt: new Date().toISOString(),
           reply: { root, parent },
           labels: BOT_SELF_LABEL,
+          // Mention facets notify + link the @handles in the copy; omitted when
+          // a reply has none (no-docket/not-found/ack) so the field stays absent.
+          ...(facets && facets.length > 0 ? { facets } : {}),
         },
       });
       return { uri: res.data.uri, cid: res.data.cid };

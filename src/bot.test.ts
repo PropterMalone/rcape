@@ -72,13 +72,17 @@ function allowGraph(dids: string[]): GraphClient {
 }
 
 function mockAgent(mentions: MentionNotif[]) {
-  const replies: { parent: StrongRef; text: string }[] = [];
+  const replies: {
+    parent: StrongRef;
+    text: string;
+    facets?: import("./facet.js").MentionFacet[];
+  }[] = [];
   const agent: BotAgent = {
     did: "did:bot",
     graph: allowGraph(["did:alice"]),
     listMentions: async () => mentions,
-    reply: async (parent, _root, text) => {
-      replies.push({ parent, text });
+    reply: async (parent, _root, text, facets) => {
+      replies.push({ parent, text, facets });
       return { uri: `reply-${replies.length}`, cid: `c${replies.length}` };
     },
   };
@@ -272,6 +276,13 @@ describe("pollOnce", () => {
       expect(replies).toHaveLength(2);
       expect(replies[0]?.text).toContain("69777799"); // ack
       expect(replies[1]?.text).toContain("@abrego-garcia.rcape.org"); // done
+      // The done reply carries a mention facet for the new case account, so the
+      // provisioned account is notified and the @handle links.
+      const doneFacet = replies[1]?.facets?.[0];
+      expect(doneFacet?.features[0]?.did).toBe("did:case");
+      expect(doneFacet?.features[0]?.$type).toBe(
+        "app.bsky.richtext.facet#mention",
+      );
       const q1 = await loadQueue(queuePath);
       expect(q1.jobs[0]?.status).toBe("done");
       expect(q1.seen).toContain("m-alice");
