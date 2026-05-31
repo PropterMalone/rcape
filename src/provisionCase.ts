@@ -15,6 +15,7 @@ import { upsertAtprotoTxt } from "./dns.js";
 import { fireBackfill } from "./fire.js";
 import { deriveHandle } from "./handle.js";
 import {
+  type Ledger,
   chargeQuota,
   findCase,
   loadLedger,
@@ -37,6 +38,21 @@ export interface ProvisionConfig {
   ledgerPath: string;
 }
 
+// A full case fetch is ~17 CL calls (docket + entry pages + party pages). We
+// charge this upfront as a reservation BEFORE fetching, then reconcile to the
+// actual count on completion — so a crash mid-fetch leaves the durable counter
+// reflecting the spend already made to CourtListener, not zero. Without this, a
+// crash loses every counted call and the re-run double-spends the shared cap.
+const RESERVED_CALLS_PER_CASE = 17;
+
+// Seams for testing the crash-mid-fetch path without a live CL call. Both
+// default to the real implementations in production.
+type MakeClient = (token: string) => CourtListenerClient;
+type MapCase = (
+  opts: { docketId: number; token: string; hashFirstNEntries: number },
+  client: CourtListenerClient,
+) => ReturnType<typeof fetchAndMapCase>;
+
 export type ProvisionResult =
   | {
       status: "provisioned";
@@ -58,13 +74,38 @@ export type ProvisionResult =
   | { status: "not-found" }
   | { status: "error"; message: string };
 
+// Reconcile the upfront reservation to the calls actually spent: re-load the
+// ledger (so a concurrent write isn't clobbered), then charge the delta
+// (actual - reservation). The delta is negative when the case needed fewer than
+// the reserved ~17 calls, refunding the over-reservation. quotaRemaining clamps
+// at zero, so a net under-count is harmless.
+async function reconcileQuota(
+  ledgerPath: string,
+  actualCalls: number,
+  day: string,
+): Promise<Ledger> {
+  const fresh = await loadLedger(ledgerPath);
+  const reconciled = chargeQuota(
+    fresh,
+    actualCalls - RESERVED_CALLS_PER_CASE,
+    day,
+  );
+  await saveLedger(ledgerPath, reconciled);
+  return reconciled;
+}
+
 // Provision a case end-to-end, in-process. Callable by both the operator CLI
 // (main, below) and the @-mention bot. Reuses the early-persist + archive +
 // quota logic; returns a discriminated result the caller maps to output/replies.
 export async function runProvision(
   docketId: number,
   cfg: ProvisionConfig,
-  opts: { force?: boolean; dryRun?: boolean } = {},
+  opts: {
+    force?: boolean;
+    dryRun?: boolean;
+    makeClient?: MakeClient;
+    mapCase?: MapCase;
+  } = {},
 ): Promise<ProvisionResult> {
   let ledger = await loadLedger(cfg.ledgerPath);
 
@@ -78,23 +119,31 @@ export async function runProvision(
     return { status: "quota-exhausted", day };
   }
 
-  const client = new CourtListenerClient(cfg.token);
+  const client = (opts.makeClient ?? ((t) => new CourtListenerClient(t)))(
+    cfg.token,
+  );
+  const mapCase = opts.mapCase ?? fetchAndMapCase;
+
+  // Reserve the expected spend BEFORE the fetch and persist it, so a crash
+  // during pagination can't lose the calls already made to CL. Reconciled to
+  // the real requestCount below (the reservation is refunded/topped-up).
+  ledger = chargeQuota(ledger, RESERVED_CALLS_PER_CASE, day);
+  await saveLedger(cfg.ledgerPath, ledger);
+
   let mapped: Awaited<ReturnType<typeof fetchAndMapCase>>;
   try {
-    mapped = await fetchAndMapCase(
+    mapped = await mapCase(
       { docketId, token: cfg.token, hashFirstNEntries: cfg.hashN },
       client,
     );
   } catch (e) {
-    // Charge the calls we spent before the failure, then classify.
-    ledger = chargeQuota(ledger, client.requestCount, day);
-    await saveLedger(cfg.ledgerPath, ledger);
+    // Reconcile the reservation to the calls actually spent, then classify.
+    ledger = await reconcileQuota(cfg.ledgerPath, client.requestCount, day);
     const msg = e instanceof Error ? e.message : String(e);
     if (/CourtListener 404/.test(msg)) return { status: "not-found" };
     return { status: "error", message: msg };
   }
-  ledger = chargeQuota(ledger, client.requestCount, day);
-  await saveLedger(cfg.ledgerPath, ledger);
+  ledger = await reconcileQuota(cfg.ledgerPath, client.requestCount, day);
 
   const taken = new Set(Object.values(ledger.cases).map((c) => c.handle));
   const handle = deriveHandle(
