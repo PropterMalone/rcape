@@ -66,6 +66,10 @@ export interface RepoClient {
           repo: string;
           writes: unknown[];
         }): Promise<unknown>;
+        uploadBlob(
+          data: Uint8Array,
+          opts: { encoding: string },
+        ): Promise<{ data: { blob: unknown } }>;
       };
     };
   };
@@ -167,6 +171,15 @@ export class CaseRepo {
       record,
     });
     return { uri: data.uri, cid: data.cid };
+  }
+
+  // Upload an image/blob and return the BlobRef to embed in a record
+  // (e.g. profile.avatar / profile.banner).
+  async uploadBlob(bytes: Uint8Array, mimeType: string): Promise<unknown> {
+    const { data } = await this.client.com.atproto.repo.uploadBlob(bytes, {
+      encoding: mimeType,
+    });
+    return data.blob;
   }
 
   async applyCreates(rows: CreateRow[]): Promise<void> {

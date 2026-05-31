@@ -5,6 +5,7 @@
 // RCAPE_BOT_PASSWORD are already set, it reuses them (skips account creation)
 // and just refreshes DNS + profile. Run: `npm run bot:init`.
 
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, truncate } from "./companionPost.js";
@@ -70,6 +71,22 @@ async function main(): Promise<void> {
 
   const repo = await CaseRepo.login({ host, identifier: did, password });
   const now = new Date().toISOString();
+
+  // Upload the seal avatar if present; mint still succeeds without it.
+  let avatar: unknown;
+  try {
+    const path = fileURLToPath(
+      new URL("../assets/avatar.png", import.meta.url),
+    );
+    avatar = await repo.uploadBlob(
+      new Uint8Array(await readFile(path)),
+      "image/png",
+    );
+    console.log("  avatar uploaded");
+  } catch (e) {
+    console.warn(`  no avatar set: ${e instanceof Error ? e.message : e}`);
+  }
+
   const seed = await repo.createRecord(POST, {
     $type: POST,
     text: INTRO,
@@ -80,6 +97,7 @@ async function main(): Promise<void> {
     $type: PROFILE,
     displayName: "R.C. Ape — the Librarian",
     description: BIO,
+    ...(avatar ? { avatar } : {}),
     labels: BOT_SELF_LABEL,
     pinnedPost: { uri: seed.uri, cid: seed.cid },
     createdAt: now,

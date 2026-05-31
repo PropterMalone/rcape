@@ -36,6 +36,9 @@ function mockClient(
             writes.push(p.writes as Write[]);
             return {};
           }),
+          uploadBlob: vi.fn(async () => ({
+            data: { blob: { $type: "blob", ref: "test" } },
+          })),
         },
       },
     },
