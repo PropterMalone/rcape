@@ -94,6 +94,69 @@ const provisionStub = async (): Promise<ProvisionResult> => ({
   failed: 0,
 });
 
+// A single allowlisted mention that parses to a docket — used to drive a full
+// enqueue+drain cycle with a stubbed provision result.
+function aliceMention(): MentionNotif {
+  return {
+    uri: "m-alice",
+    cid: "ca",
+    authorDid: "did:alice",
+    authorHandle: "alice.test",
+    text: "@ape.rcape.org add https://www.courtlistener.com/docket/69777799/x/",
+    root: { uri: "m-alice", cid: "ca" },
+  };
+}
+
+describe("drain error logging (no credential leak)", () => {
+  it("never logs the raw provision result or a credential-bearing message", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    const errs: unknown[][] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errs.push(args);
+      });
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent } = mockAgent([aliceMention()]);
+      const cfg = {
+        token: "t",
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath,
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg,
+        queuePath,
+        // Error whose message carries a sentinel credential string.
+        provision: async (): Promise<ProvisionResult> => ({
+          status: "error",
+          message: "PDS auth failed PASSWORD=xyz while minting",
+        }),
+      };
+
+      await pollOnce(deps);
+
+      const logged = errs.map((a) => JSON.stringify(a)).join("\n");
+      expect(logged).not.toContain("PASSWORD=xyz");
+      expect(logged).not.toContain("xyz");
+      // The docket id is still logged so the failure is diagnosable.
+      expect(logged).toContain("69777799");
+    } finally {
+      spy.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("pollOnce", () => {
   it("skips self, acks + provisions an allowlisted request, and dedupes", async () => {
     const { pollOnce } = await import("./bot.js");

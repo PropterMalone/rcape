@@ -207,7 +207,11 @@ async function drain(
       break; // resume after reset
     } else {
       // error — leave a failed marker; don't spam a reply on transient errors.
-      console.error(`provision failed for docket ${job.docketId}:`, result);
+      // Log only the docket id and the status, never result.message: PDS auth
+      // errors can echo credentials, and journald retains them indefinitely.
+      console.error(
+        `provision failed for docket ${job.docketId}: ${result.status}`,
+      );
       queue = markFailed(queue, job.docketId);
     }
     await saveQueue(deps.queuePath, queue);
