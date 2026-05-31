@@ -87,7 +87,11 @@ const today = (): string => new Date().toISOString().slice(0, 10);
 export async function pollOnce(deps: BotDeps): Promise<void> {
   const provision = deps.provision ?? ((id, cfg) => runProvision(id, cfg));
   let queue = await loadQueue(deps.queuePath);
-  const mentions = await deps.agent.listMentions();
+  // Paginate until we reach an already-processed notification, so a burst of
+  // likes/follows can't scroll real mentions off page 1 and drop them.
+  const mentions = await deps.agent.listMentions({
+    isSeen: (uri) => hasSeen(queue, uri),
+  });
 
   for (const m of mentions) {
     if (m.authorDid === deps.agent.did) continue; // never reply to self (loop guard)
