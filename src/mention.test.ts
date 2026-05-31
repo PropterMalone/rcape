@@ -18,6 +18,13 @@ describe("parseDocketId", () => {
     expect(parseDocketId(undefined)).toBeNull();
     expect(parseDocketId("not-a-docket")).toBeNull();
   });
+
+  it("rejects non-positive and overflow-range values", () => {
+    expect(parseDocketId("0")).toBeNull();
+    // >= 1e10 is well beyond CL docket id width — almost certainly a timestamp.
+    expect(parseDocketId("10000000000")).toBeNull();
+    expect(parseDocketId("99999999999999")).toBeNull();
+  });
 });
 
 describe("parseMention", () => {
@@ -29,16 +36,54 @@ describe("parseMention", () => {
     ).toEqual({ docketId: 69777799 });
   });
 
-  it("accepts a bare 6+ digit CL docket id", () => {
+  it("accepts a bare 7+ digit CL docket id when a keyword is present", () => {
     expect(parseMention("@ape.rcape.org docket 69777799 please")).toEqual({
       docketId: 69777799,
     });
+    expect(parseMention("@ape.rcape.org add case 1234567")).toEqual({
+      docketId: 1234567,
+    });
   });
 
-  it("ignores case-number digits and years (no docket url, no 6+ digit run)", () => {
+  it("ignores case-number digits and years (no docket url, no qualifying run)", () => {
     expect(
       parseMention("@ape.rcape.org can you add 8:25-cv-00951 from 2025?"),
     ).toEqual({ kind: "no-docket" });
+  });
+
+  it("does NOT parse a bare 6-digit number (too short for a CL docket id)", () => {
+    // A 6-digit ZIP+4 stub / short number must not trigger a quota-burning fetch,
+    // even with a keyword nearby.
+    expect(parseMention("@ape.rcape.org please add case 902210")).toEqual({
+      kind: "no-docket",
+    });
+  });
+
+  it("does NOT parse an embedded phone number or ZIP as a docket", () => {
+    // Phone (10 digits) with no docket keyword/URL — bare-number path must not fire.
+    expect(parseMention("@ape.rcape.org call me at 5551234567 thanks")).toEqual(
+      { kind: "no-docket" },
+    );
+    // 5-digit ZIP — below the floor regardless.
+    expect(parseMention("@ape.rcape.org I'm in 90210 btw")).toEqual({
+      kind: "no-docket",
+    });
+  });
+
+  it("does NOT parse a bare 7+ digit number without a docket keyword or URL", () => {
+    // A standalone long integer (timestamp, AT-URI rkey digits) with no signal
+    // it is a docket request — must not burn a fetch.
+    expect(
+      parseMention("@ape.rcape.org the number 1700000000 is cool"),
+    ).toEqual({ kind: "no-docket" });
+  });
+
+  it("still parses a CL docket URL even without a keyword", () => {
+    expect(
+      parseMention(
+        "@ape.rcape.org https://www.courtlistener.com/docket/69777799/x/",
+      ),
+    ).toEqual({ docketId: 69777799 });
   });
 
   it("returns no-docket for text with no docket reference", () => {
