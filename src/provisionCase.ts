@@ -74,6 +74,30 @@ export type ProvisionResult =
   | { status: "not-found" }
   | { status: "error"; message: string };
 
+const ENTRY_COLLECTION = "org.rcape.docketEntry";
+
+// pattern: Functional Core
+// The high-water sequence number is the max recapSequenceNumber among entries
+// that ACTUALLY posted — i.e. excluding the rkeys fireBackfill reported as
+// failed. Setting highWater to the snapshot max (ignoring failures) would let a
+// future incremental monitor skip the un-posted entries forever, since it only
+// fetches filings beyond highWater. recapSequenceNumber sorts lexically (it's a
+// zero-padded string), matching the ordering fireBackfill uses.
+export function postedHighWater(
+  entries: { rkey: string; recapSequenceNumber?: string }[],
+  failedRkeys: string[],
+): string | undefined {
+  const failed = new Set(failedRkeys);
+  let max: string | undefined;
+  for (const e of entries) {
+    if (failed.has(e.rkey)) continue;
+    const seq = e.recapSequenceNumber;
+    if (seq === undefined) continue;
+    if (max === undefined || seq.localeCompare(max) > 0) max = seq;
+  }
+  return max;
+}
+
 // Reconcile the upfront reservation to the calls actually spent: under the
 // advisory lock, re-read the ledger (so a concurrent write isn't clobbered),
 // then charge the delta (actual - reservation). The delta is negative when the
@@ -212,16 +236,22 @@ export async function runProvision(
   await repo.applyCreates(rcapeRecords);
   const result = await fireBackfill(repo);
 
-  // highWater is the max recapSequenceNumber from the CL snapshot at provision
-  // time, not the live repo; if result.failed is non-empty it may be ahead of
-  // what was actually posted (those rkeys are recorded in backfillFailed).
-  const sorted = [...mapped.entryRecords].sort((a, b) =>
-    (a.recapSequenceNumber ?? "").localeCompare(b.recapSequenceNumber ?? ""),
-  );
+  // highWater must cap at the max recapSequenceNumber actually POSTED, not the
+  // snapshot max: result.failed holds the entry rkeys whose backdated doc-post
+  // failed, and advancing highWater past them would make the future incremental
+  // monitor (which only fetches filings beyond highWater) skip them forever.
+  // Correlate failed rkeys to sequence numbers via rcapeRecords (rkey + value).
+  const entrySeqs = rcapeRecords
+    .filter((r) => r.collection === ENTRY_COLLECTION)
+    .map((r) => ({
+      rkey: r.rkey,
+      recapSequenceNumber: (r.value as { recapSequenceNumber?: string })
+        .recapSequenceNumber,
+    }));
   ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
     recordCase(fresh, docketId, {
       ...entry,
-      highWater: sorted[sorted.length - 1]?.recapSequenceNumber,
+      highWater: postedHighWater(entrySeqs, result.failed),
       backfillFailed: result.failed.length > 0 ? result.failed : undefined,
     }),
   );

@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MappedCase } from "./build.js";
 import type { CourtListenerClient } from "./courtlistener.js";
 import { emptyLedger, loadLedger, saveLedger } from "./ledger.js";
-import { type ProvisionConfig, runProvision } from "./provisionCase.js";
+import {
+  type ProvisionConfig,
+  postedHighWater,
+  runProvision,
+} from "./provisionCase.js";
 
 let dir: string;
 beforeEach(async () => {
@@ -90,5 +94,42 @@ describe("runProvision incremental quota", () => {
     const ledger = await loadLedger(ledgerPath);
     // Reservation (17) reconciled down to the actual 13 calls.
     expect(ledger.quota.count).toBe(ACTUAL);
+  });
+});
+
+describe("postedHighWater", () => {
+  // recapSequenceNumber sorts lexically; the entries here are pre-sorted ascending.
+  const entry = (rkey: string, seq: string) => ({
+    rkey,
+    recapSequenceNumber: seq,
+  });
+
+  it("returns the snapshot max when nothing failed", () => {
+    const entries = [entry("a", "001"), entry("b", "002"), entry("c", "003")];
+    expect(postedHighWater(entries, [])).toBe("003");
+  });
+
+  it("caps below the failed rkeys so the monitor doesn't skip un-posted entries", () => {
+    const entries = [entry("a", "001"), entry("b", "002"), entry("c", "003")];
+    // The two highest-sequence entries failed to post → highWater must fall back
+    // to the highest SUCCESSFULLY posted entry, not the snapshot max.
+    expect(postedHighWater(entries, ["b", "c"])).toBe("001");
+  });
+
+  it("is undefined when every entry failed (nothing posted, nothing to advance)", () => {
+    const entries = [entry("a", "001"), entry("b", "002")];
+    expect(postedHighWater(entries, ["a", "b"])).toBeUndefined();
+  });
+
+  it("is undefined with no entries", () => {
+    expect(postedHighWater([], [])).toBeUndefined();
+  });
+
+  it("ignores entries without a sequence number", () => {
+    const entries = [
+      { rkey: "a", recapSequenceNumber: undefined },
+      entry("b", "002"),
+    ];
+    expect(postedHighWater(entries, [])).toBe("002");
   });
 });

@@ -19,7 +19,10 @@ export type ReplyKind =
   // is known then (the case name costs a quota call we haven't spent yet).
   | { kind: "ack"; docketId: number }
   | { kind: "queued"; docketId: number; ahead: number }
-  | { kind: "provisioned"; caseName: string; handle: string }
+  // `failed` is the count of filings whose backdated doc-post failed during
+  // backfill (0 on a clean run). Surfaced so the requester knows the archive is
+  // partial — those entries exist as records but have no companion post yet.
+  | { kind: "provisioned"; caseName: string; handle: string; failed: number }
   | { kind: "exists"; handle: string }
   | { kind: "declined" }
   | { kind: "no-docket" }
@@ -37,9 +40,16 @@ export function buildReply(r: ReplyKind): string {
     case "queued":
       text = `Ook. Docket ${r.docketId} is in the queue (~${r.ahead} ahead). I shelve cases as the daily archive budget allows; I'll reply here when it's done.`;
       break;
-    case "provisioned":
-      text = `Ook. Shelved: ${truncate(r.caseName, NAME_BUDGET)} now lives at @${r.handle} — every filing, in order. Browse the docket or follow along.`;
+    case "provisioned": {
+      // The @handle is the load-bearing payload; the partial-failure note is
+      // appended after it so truncation drops the note before the handle.
+      const partial =
+        r.failed > 0
+          ? ` (${r.failed} ${r.failed === 1 ? "filing" : "filings"} couldn't be posted yet — I'll have another go later.)`
+          : "";
+      text = `Ook. Shelved: ${truncate(r.caseName, NAME_BUDGET)} now lives at @${r.handle} — every filing, in order. Browse the docket or follow along.${partial}`;
       break;
+    }
     case "exists":
       text = `Ook. Already in the stacks — that case is at @${r.handle}.`;
       break;

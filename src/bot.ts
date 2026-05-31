@@ -294,6 +294,7 @@ async function drain(
         kind: "provisioned",
         caseName: result.caseName,
         handle: result.handle,
+        failed: result.failed,
       });
       await deps.agent.reply(
         parent,

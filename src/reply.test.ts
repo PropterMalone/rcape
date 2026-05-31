@@ -11,6 +11,7 @@ const all: ReplyKind[] = [
     kind: "provisioned",
     caseName: "Abrego Garcia v. Noem",
     handle: "abrego-garcia.rcape.org",
+    failed: 0,
   },
   { kind: "exists", handle: "abrego-garcia.rcape.org" },
   { kind: "declined" },
@@ -31,6 +32,7 @@ describe("buildReply", () => {
         kind: "provisioned",
         caseName: "Abrego Garcia v. Noem",
         handle: "abrego-garcia.rcape.org",
+        failed: 0,
       }),
     ).toContain("@abrego-garcia.rcape.org");
     expect(buildReply({ kind: "exists", handle: "x.rcape.org" })).toContain(
@@ -44,9 +46,29 @@ describe("buildReply", () => {
       kind: "provisioned",
       caseName: longName,
       handle: "case-9.rcape.org",
+      failed: 0,
     });
     expect(out).toContain("@case-9.rcape.org");
     expect(graphemes(out)).toBeLessThanOrEqual(300);
+  });
+
+  it("notes the failed-post count when some filings didn't post, omits it at zero", () => {
+    const clean = buildReply({
+      kind: "provisioned",
+      caseName: "Doe v. Roe",
+      handle: "doe.rcape.org",
+      failed: 0,
+    });
+    // No failures → no "couldn't be posted" note.
+    expect(clean.toLowerCase()).not.toContain("couldn't be posted");
+    const partial = buildReply({
+      kind: "provisioned",
+      caseName: "Doe v. Roe",
+      handle: "doe.rcape.org",
+      failed: 3,
+    });
+    expect(partial).toContain("3");
+    expect(graphemes(partial)).toBeLessThanOrEqual(300);
   });
 
   it("references the docket id in the ack (case name not yet known)", () => {
