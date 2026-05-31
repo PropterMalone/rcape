@@ -92,6 +92,10 @@ export async function resolveAllowlist(
 export class AllowlistCache {
   private dids = new Set<string>();
   private fetchedAt = 0;
+  // In-flight refresh, shared by concurrent callers (single-flight). Without it,
+  // two has() calls landing together at TTL expiry both launch resolveAllowlist
+  // and race to overwrite cache state — a duplicate, wasted graph fetch.
+  private refreshing: Promise<void> | null = null;
 
   // 60s default: the drain-time re-check is authoritative, so this TTL is just a
   // soft cache that bounds how stale an enqueue-time decision can be. Tunable
@@ -109,6 +113,17 @@ export class AllowlistCache {
 
   async ensureFresh(): Promise<void> {
     if (this.fetchedAt > 0 && Date.now() - this.fetchedAt < this.ttlMs) return;
+    // Join an in-flight refresh rather than launching a second.
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.refresh();
+    try {
+      await this.refreshing;
+    } finally {
+      this.refreshing = null;
+    }
+  }
+
+  private async refresh(): Promise<void> {
     this.dids = await resolveAllowlist(this.client, this.actor);
     this.fetchedAt = Date.now();
   }

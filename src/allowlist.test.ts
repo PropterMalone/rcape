@@ -77,4 +77,41 @@ describe("AllowlistCache", () => {
       vi.useRealTimers();
     }
   });
+
+  it("single-flights a concurrent refresh (two has() at expiry = one resolve)", async () => {
+    // A resolveAllowlist that doesn't settle until we release it, so both has()
+    // calls overlap inside ensureFresh and would each launch a fetch without the
+    // single-flight guard.
+    let resolveFetch: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      resolveFetch = r;
+    });
+    let resolves = 0;
+    const client: GraphClient = {
+      app: {
+        bsky: {
+          graph: {
+            getFollows: vi.fn(async () => {
+              resolves++;
+              await gate;
+              return { data: { follows: [{ did: "did:a" }] } };
+            }),
+            getFollowers: vi.fn(async () => ({ data: { followers: [] } })),
+          },
+        },
+      },
+    };
+    const cache = new AllowlistCache(client, "owner.test", 60_000);
+
+    // Fire both has() before the first resolve settles → they must share it.
+    const p1 = cache.has("did:a");
+    const p2 = cache.has("did:a");
+    resolveFetch();
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1).toBe(true);
+    expect(r2).toBe(true);
+    // getFollows ran exactly once despite two concurrent has() at expiry.
+    expect(resolves).toBe(1);
+  });
 });
