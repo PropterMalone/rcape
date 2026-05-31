@@ -24,6 +24,8 @@ export type ReplyKind =
   // partial — those entries exist as records but have no companion post yet.
   | { kind: "provisioned"; caseName: string; handle: string; failed: number }
   | { kind: "exists"; handle: string }
+  // The requester is at their in-flight cap; their new docket wasn't queued.
+  | { kind: "over-cap"; inFlight: number }
   | { kind: "declined" }
   | { kind: "no-docket" }
   | { kind: "not-found" }
@@ -52,6 +54,9 @@ export function buildReply(r: ReplyKind): string {
     }
     case "exists":
       text = `Ook. Already in the stacks — that case is at @${r.handle}.`;
+      break;
+    case "over-cap":
+      text = `Ook. You already have ${r.inFlight} requests in my queue — I'll work through those first, then you can ask again. One ape, many stacks.`;
       break;
     case "declined":
       text = `Ook. For now the Librarian admits requests only from those @${OWNER_DISPLAY_HANDLE} follows, or who follow @${OWNER_DISPLAY_HANDLE}. Ask there for a card.`;

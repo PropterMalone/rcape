@@ -14,6 +14,7 @@ const all: ReplyKind[] = [
     failed: 0,
   },
   { kind: "exists", handle: "abrego-garcia.rcape.org" },
+  { kind: "over-cap", inFlight: 3 },
   { kind: "declined" },
   { kind: "no-docket" },
   { kind: "not-found" },

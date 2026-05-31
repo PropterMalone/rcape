@@ -7,7 +7,13 @@ import { type BotDeps, classify } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
 import { emptyLedger, saveLedger } from "./ledger.js";
 import type { ProvisionConfig, ProvisionResult } from "./provisionCase.js";
-import { type StrongRef, findJob, loadQueue } from "./queue.js";
+import {
+  type Job,
+  type StrongRef,
+  findJob,
+  loadQueue,
+  saveQueue,
+} from "./queue.js";
 
 describe("classify", () => {
   const docket = { docketId: 69777799 } as const;
@@ -290,6 +296,66 @@ describe("pollOnce", () => {
       // second cycle: alice's mention is already seen → no new replies.
       await pollOnce(deps);
       expect(replies).toHaveLength(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("over-cap requester", () => {
+  it("replies (not silence) when a requester at their cap mentions another docket", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      // Pre-seed alice at the PER_REQUESTER_CAP (3) with distinct dockets so a
+      // new mention is rejected with `requester-cap`, not `duplicate`.
+      const queued = (docketId: number): Job => ({
+        docketId,
+        requesterDid: "did:alice",
+        requesterHandle: "alice.test",
+        mention: { uri: `m${docketId}`, cid: `c${docketId}` },
+        rootRef: { uri: `m${docketId}`, cid: `c${docketId}` },
+        status: "queued",
+        createdAt: "2026-05-31T00:00:00.000Z",
+      });
+      await saveQueue(queuePath, {
+        jobs: [queued(11111111), queued(22222222), queued(33333333)],
+        seen: [],
+      });
+
+      // alice mentions a fourth, distinct docket → over her cap.
+      const fourth: MentionNotif = {
+        uri: "m-alice-4",
+        cid: "ca4",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "@ape.rcape.org add https://www.courtlistener.com/docket/44444444/x/",
+        root: { uri: "m-alice-4", cid: "ca4" },
+      };
+      const { agent, replies } = mockAgent([fourth]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        // Never provision: quota check is skipped here; we only test the reply.
+        provision: async (): Promise<ProvisionResult> => provisionStub(),
+      };
+
+      await pollOnce(deps);
+
+      // The over-cap mention got a reply — not silent — and the mention is seen.
+      const overCap = replies.find((r) => r.text.includes("already"));
+      expect(overCap).toBeDefined();
+      expect(overCap?.text).toContain("3"); // surfaces the in-flight count
+      const q = await loadQueue(queuePath);
+      expect(q.seen).toContain("m-alice-4");
+      // No new job was enqueued for the fourth docket.
+      expect(findJob(q, 44444444)).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

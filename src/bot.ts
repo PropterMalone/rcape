@@ -31,6 +31,7 @@ import {
   markSeen,
   mutateQueue,
   nextDrainable,
+  perRequesterQueued,
   setAck,
 } from "./queue.js";
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
@@ -196,7 +197,23 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         await persistQueue(deps.queuePath, queue);
         continue;
       }
-      // enqueue rejected (duplicate / over cap) → no reply, just mark seen.
+      // A `requester-cap` rejection means a real docket the requester asked for
+      // wasn't queued — reply so they aren't met with silence (a `duplicate`
+      // rejection is a re-mention of an in-flight docket, where silence is fine:
+      // the original ack/queued reply already stands). Mark seen below either way.
+      if (res.reason === "requester-cap") {
+        queue = markSeen(queue, m.uri);
+        await persistQueue(deps.queuePath, queue);
+        await deps.agent.reply(
+          parent,
+          m.root,
+          buildReply({
+            kind: "over-cap",
+            inFlight: perRequesterQueued(queue, m.authorDid),
+          }),
+        );
+        continue;
+      }
     }
 
     queue = markSeen(queue, m.uri);
