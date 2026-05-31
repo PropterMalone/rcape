@@ -2,8 +2,14 @@
 // Persistent job queue for the @-mention bot: one active job per docket, drained
 // under the CL daily budget. Also tracks processed notification URIs so each
 // mention is handled exactly once across restarts. Lives in gitignored data/.
+//
+// LOCK CONTRACT: the bot is the queue's single writer, but a read-modify-write
+// of queue.json still goes through mutateQueue (advisory lock + re-read under
+// the lock) so two pollOnce cycles — or a future tool — can't clobber each
+// other. A bare saveQueue overwrites the whole file; use mutateQueue for any
+// load-then-modify-then-save, and reserve saveQueue for from-scratch writes.
 
-import { loadJson, saveJson } from "./atomicJson.js";
+import { loadJson, mutateJson, saveJson } from "./atomicJson.js";
 
 export interface StrongRef {
   uri: string;
@@ -142,11 +148,26 @@ export function markSeen(q: QueueState, uri: string): QueueState {
   return { ...q, seen: seen.slice(-SEEN_CAP) };
 }
 
-export async function loadQueue(path: string): Promise<QueueState> {
-  const parsed = await loadJson<Partial<QueueState>>(path, emptyQueue);
+function normalize(parsed: Partial<QueueState>): QueueState {
   return { jobs: parsed.jobs ?? [], seen: parsed.seen ?? [] };
+}
+
+export async function loadQueue(path: string): Promise<QueueState> {
+  return normalize(await loadJson<Partial<QueueState>>(path, emptyQueue));
 }
 
 export async function saveQueue(path: string, q: QueueState): Promise<void> {
   await saveJson(path, q);
+}
+
+// Cross-process-safe read-modify-write of the queue: re-reads under an advisory
+// lock, applies `mutate`, and saves atomically. `mutate` receives the freshly
+// re-read queue so a concurrent writer's change isn't lost.
+export async function mutateQueue(
+  path: string,
+  mutate: (q: QueueState) => QueueState | Promise<QueueState>,
+): Promise<QueueState> {
+  return mutateJson<QueueState>(path, emptyQueue, async (parsed) =>
+    mutate(normalize(parsed)),
+  );
 }

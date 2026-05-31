@@ -19,6 +19,7 @@ import {
 } from "./provisionCase.js";
 import {
   type Job,
+  type QueueState,
   type StrongRef,
   enqueue,
   findJob,
@@ -28,8 +29,8 @@ import {
   markFailed,
   markRetrying,
   markSeen,
+  mutateQueue,
   nextDrainable,
-  saveQueue,
   setAck,
 } from "./queue.js";
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
@@ -107,6 +108,14 @@ export interface BotDeps {
 
 const today = (): string => new Date().toISOString().slice(0, 10);
 
+// Persist the bot's authoritative in-memory queue under the advisory lock. The
+// bot is the queue's single writer and pollOnce runs serially, so the lock just
+// provides mutual exclusion (no re-read-merge needed) while honoring the
+// load-then-modify-then-save lock contract documented in queue.ts.
+function persistQueue(path: string, q: QueueState): Promise<QueueState> {
+  return mutateQueue(path, () => q);
+}
+
 // Build mention facets for a reply's text from the handles relevant to it. Each
 // reply kind embeds at most one provisioned-case handle (→ caseDid) and/or
 // @proptermalone (→ ownerDid); mentionFacets scans the copy and emits a facet
@@ -170,7 +179,7 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         // A crash after the ack but before this save would otherwise lose the
         // job entirely, so on restart the mention re-enqueues and re-acks.
         queue = markSeen(queue, m.uri);
-        await saveQueue(deps.queuePath, queue);
+        await persistQueue(deps.queuePath, queue);
 
         const ackText =
           action.kind === "ack-enqueue"
@@ -184,14 +193,14 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         // The ackRef only refines reply threading; a crash here at worst parents
         // the done-reply on the mention instead of the ack. Persist it best-effort.
         queue = setAck(queue, action.docketId, ackRef);
-        await saveQueue(deps.queuePath, queue);
+        await persistQueue(deps.queuePath, queue);
         continue;
       }
       // enqueue rejected (duplicate / over cap) → no reply, just mark seen.
     }
 
     queue = markSeen(queue, m.uri);
-    await saveQueue(deps.queuePath, queue);
+    await persistQueue(deps.queuePath, queue);
   }
 
   await drain(deps, provision);
@@ -239,7 +248,7 @@ async function drain(
     // request. No reply: a revoked user shouldn't get a provisioned-case link.
     if (!(await deps.allowlist.has(job.requesterDid))) {
       queue = markFailed(queue, job.docketId);
-      await saveQueue(deps.queuePath, queue);
+      await persistQueue(deps.queuePath, queue);
       continue;
     }
 
@@ -278,7 +287,7 @@ async function drain(
       // quota-exhausted: leave the job queued and resume after the daily reset.
       break;
     }
-    await saveQueue(deps.queuePath, queue);
+    await persistQueue(deps.queuePath, queue);
 
     if (result.status === "provisioned") {
       const text = buildReply({

@@ -19,9 +19,9 @@ import {
   chargeQuota,
   findCase,
   loadLedger,
+  mutateLedger,
   quotaRemaining,
   recordCase,
-  saveLedger,
 } from "./ledger.js";
 import { parseDocketId } from "./mention.js";
 import { createCaseAccount, generatePassword } from "./provision.js";
@@ -74,24 +74,19 @@ export type ProvisionResult =
   | { status: "not-found" }
   | { status: "error"; message: string };
 
-// Reconcile the upfront reservation to the calls actually spent: re-load the
-// ledger (so a concurrent write isn't clobbered), then charge the delta
-// (actual - reservation). The delta is negative when the case needed fewer than
-// the reserved ~17 calls, refunding the over-reservation. quotaRemaining clamps
-// at zero, so a net under-count is harmless.
+// Reconcile the upfront reservation to the calls actually spent: under the
+// advisory lock, re-read the ledger (so a concurrent write isn't clobbered),
+// then charge the delta (actual - reservation). The delta is negative when the
+// case needed fewer than the reserved ~17 calls, refunding the over-reservation.
+// quotaRemaining clamps at zero, so a net under-count is harmless.
 async function reconcileQuota(
   ledgerPath: string,
   actualCalls: number,
   day: string,
 ): Promise<Ledger> {
-  const fresh = await loadLedger(ledgerPath);
-  const reconciled = chargeQuota(
-    fresh,
-    actualCalls - RESERVED_CALLS_PER_CASE,
-    day,
+  return mutateLedger(ledgerPath, (fresh) =>
+    chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day),
   );
-  await saveLedger(ledgerPath, reconciled);
-  return reconciled;
 }
 
 // Provision a case end-to-end, in-process. Callable by both the operator CLI
@@ -125,10 +120,12 @@ export async function runProvision(
   const mapCase = opts.mapCase ?? fetchAndMapCase;
 
   // Reserve the expected spend BEFORE the fetch and persist it, so a crash
-  // during pagination can't lose the calls already made to CL. Reconciled to
-  // the real requestCount below (the reservation is refunded/topped-up).
-  ledger = chargeQuota(ledger, RESERVED_CALLS_PER_CASE, day);
-  await saveLedger(cfg.ledgerPath, ledger);
+  // during pagination can't lose the calls already made to CL. Charged under the
+  // lock against a freshly-read ledger so a concurrent CLI/bot quota write isn't
+  // clobbered; reconciled to the real requestCount below.
+  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+    chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day),
+  );
 
   let mapped: Awaited<ReturnType<typeof fetchAndMapCase>>;
   try {
@@ -194,8 +191,11 @@ export async function runProvision(
     password,
     createdAt,
   };
-  ledger = recordCase(ledger, docketId, entry);
-  await saveLedger(cfg.ledgerPath, ledger);
+  // recordCase under the lock against a fresh read: a concurrent quota charge
+  // (this provision's own reconcile, or another writer) must not be clobbered.
+  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+    recordCase(fresh, docketId, entry),
+  );
 
   await upsertAtprotoTxt(handle, account.did, {
     zoneId: cfg.zoneId,
@@ -218,12 +218,13 @@ export async function runProvision(
   const sorted = [...mapped.entryRecords].sort((a, b) =>
     (a.recapSequenceNumber ?? "").localeCompare(b.recapSequenceNumber ?? ""),
   );
-  ledger = recordCase(ledger, docketId, {
-    ...entry,
-    highWater: sorted[sorted.length - 1]?.recapSequenceNumber,
-    backfillFailed: result.failed.length > 0 ? result.failed : undefined,
-  });
-  await saveLedger(cfg.ledgerPath, ledger);
+  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+    recordCase(fresh, docketId, {
+      ...entry,
+      highWater: sorted[sorted.length - 1]?.recapSequenceNumber,
+      backfillFailed: result.failed.length > 0 ? result.failed : undefined,
+    }),
+  );
 
   return {
     status: "provisioned",

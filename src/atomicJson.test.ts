@@ -3,7 +3,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CorruptStateError, loadJson, saveJson } from "./atomicJson.js";
+import {
+  CorruptStateError,
+  loadJson,
+  mutateJson,
+  saveJson,
+  withLock,
+} from "./atomicJson.js";
 
 let dir: string;
 beforeEach(async () => {
@@ -65,5 +71,72 @@ describe("saveJson / loadJson", () => {
     await expect(loadJson(path, () => ({}))).rejects.toBeInstanceOf(
       CorruptStateError,
     );
+  });
+});
+
+describe("withLock / mutateJson (cross-process write safety)", () => {
+  it("serializes interleaved read-modify-write so neither increment is lost", async () => {
+    const path = join(dir, "counter.json");
+    await saveJson(path, { n: 0 });
+
+    // Two concurrent mutators each read-then-increment. Without the lock both
+    // would read n=0 and write n=1 (one lost update); the lock serializes them.
+    const bump = () =>
+      mutateJson<{ n: number }>(
+        path,
+        () => ({ n: 0 }),
+        (s) => {
+          return { n: s.n + 1 };
+        },
+      );
+    await Promise.all([bump(), bump()]);
+
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ n: 2 });
+  });
+
+  it("releases the lock on success so a later acquire succeeds", async () => {
+    const path = join(dir, "state.json");
+    await withLock(path, async () => {
+      /* hold + release */
+    });
+    // The lockfile must not linger after a successful run.
+    expect(await readdir(dir)).not.toContain(".state.json.lock");
+    // A second acquire works (would hang/throw if the lock were stuck).
+    let ran = false;
+    await withLock(path, async () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
+  });
+
+  it("releases the lock even when the critical section throws", async () => {
+    const path = join(dir, "state.json");
+    await expect(
+      withLock(path, async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    // Lock released despite the throw → the next acquire succeeds.
+    let ran = false;
+    await withLock(path, async () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
+  });
+
+  it("breaks a stale lock left by a dead holder (older than the stale timeout)", async () => {
+    const path = join(dir, "state.json");
+    const lockPath = join(dir, ".state.json.lock");
+    // Simulate a crashed holder: a lockfile with a far-past mtime.
+    await writeFile(lockPath, "dead-pid");
+    const { utimes } = await import("node:fs/promises");
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+
+    let ran = false;
+    await withLock(path, async () => {
+      ran = true;
+    });
+    expect(ran).toBe(true); // stale lock was broken, not waited on forever
   });
 });

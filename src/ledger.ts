@@ -3,8 +3,14 @@
 // plus a per-day CourtListener request counter so on-demand provisioning stays
 // under the shared free-tier cap. Holds per-case account passwords, so it lives
 // in the gitignored data/ directory.
+//
+// LOCK CONTRACT: both the always-on bot and the operator CLI read-modify-write
+// this file, so every such cycle MUST go through mutateLedger (advisory lock +
+// re-read under the lock). A bare saveLedger overwrites the whole file and can
+// clobber a concurrent writer's quota charge or recordCase entry — use it only
+// for a from-scratch write (tests/init), never for an increment/merge.
 
-import { loadJson, saveJson } from "./atomicJson.js";
+import { loadJson, mutateJson, saveJson } from "./atomicJson.js";
 
 export interface CaseEntry {
   did: string;
@@ -84,14 +90,30 @@ export function chargeQuota(ledger: Ledger, n: number, day: string): Ledger {
   return { ...ledger, quota: { day, count: used + n } };
 }
 
-export async function loadLedger(path: string): Promise<Ledger> {
-  const parsed = await loadJson<Partial<Ledger>>(path, emptyLedger);
+function normalize(parsed: Partial<Ledger>): Ledger {
   return {
     cases: parsed.cases ?? {},
     quota: parsed.quota ?? { day: "", count: 0 },
   };
 }
 
+export async function loadLedger(path: string): Promise<Ledger> {
+  return normalize(await loadJson<Partial<Ledger>>(path, emptyLedger));
+}
+
 export async function saveLedger(path: string, ledger: Ledger): Promise<void> {
   await saveJson(path, ledger);
+}
+
+// Cross-process-safe read-modify-write of the ledger: re-reads under an advisory
+// lock, applies `mutate`, and saves atomically — so a concurrent CLI/bot write
+// isn't lost. Use this for every increment/merge (quota charges, recordCase);
+// `mutate` receives the freshly-read ledger, not a possibly-stale in-memory copy.
+export async function mutateLedger(
+  path: string,
+  mutate: (ledger: Ledger) => Ledger | Promise<Ledger>,
+): Promise<Ledger> {
+  return mutateJson<Ledger>(path, emptyLedger, async (parsed) =>
+    mutate(normalize(parsed)),
+  );
 }
