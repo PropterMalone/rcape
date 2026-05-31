@@ -55,11 +55,26 @@ describe("AllowlistCache", () => {
     expect(calls()).toBe(3);
   });
 
-  it("refreshes after the TTL expires", async () => {
-    const { client, calls } = mockClient();
-    const cache = new AllowlistCache(client, "proptermalone.test", 0);
-    await cache.has("did:a");
-    await cache.has("did:a");
-    expect(calls()).toBe(6); // re-resolved on the second call (ttl 0)
+  it("re-fetches only after the TTL elapses (fake timers)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, calls } = mockClient();
+      const cache = new AllowlistCache(client, "proptermalone.test", 60_000);
+      await cache.has("did:a");
+      expect(calls()).toBe(3); // first resolve
+
+      // Within the TTL: served from cache, no re-fetch. (A `<`→`<=` off-by-one
+      // regression would slip past the vacuous ttl=0 test but fail here.)
+      vi.advanceTimersByTime(59_999);
+      await cache.has("did:a");
+      expect(calls()).toBe(3);
+
+      // Past the TTL: re-resolves.
+      vi.advanceTimersByTime(2);
+      await cache.has("did:a");
+      expect(calls()).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

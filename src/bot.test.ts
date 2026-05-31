@@ -295,3 +295,79 @@ describe("pollOnce", () => {
     }
   });
 });
+
+describe("drain-time allowlist re-check", () => {
+  it("drops a job whose requester was revoked after enqueue (no provision)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      // A mutable allowlist source: alice is allowed at enqueue, then revoked
+      // before drain re-checks. ttl=0 forces a re-resolve on every has().
+      let allowed = ["did:alice"];
+      const graph: GraphClient = {
+        app: {
+          bsky: {
+            graph: {
+              getFollows: vi.fn(async () => ({
+                data: { follows: allowed.map((did) => ({ did })) },
+              })),
+              getFollowers: vi.fn(async () => ({ data: { followers: [] } })),
+            },
+          },
+        },
+      };
+      const { agent, replies } = mockAgent([aliceMention()]);
+      agent.graph = graph;
+      // Revoke alice the moment classify has acked her (the first has() at
+      // enqueue sees her; the drain re-check below must not).
+      const revokeAfterEnqueue = new AllowlistCache(graph, "owner.test", 0);
+      const origHas = revokeAfterEnqueue.has.bind(revokeAfterEnqueue);
+      let calls = 0;
+      revokeAfterEnqueue.has = async (did: string) => {
+        const r = await origHas(did);
+        calls++;
+        if (calls === 1) allowed = []; // revoke right after the enqueue check
+        return r;
+      };
+
+      let provisionCalls = 0;
+      const cfg = {
+        token: "t",
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath,
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: revokeAfterEnqueue,
+        cfg,
+        queuePath,
+        provision: async () => {
+          provisionCalls++;
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      // Acked at enqueue, then revoked → drain must NOT provision.
+      expect(provisionCalls).toBe(0);
+      // Only the ack reply went out; no done/provisioned reply.
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(
+        false,
+      );
+      // The job is in a terminal state, not left queued.
+      const q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).not.toBe("queued");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

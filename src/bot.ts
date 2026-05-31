@@ -218,6 +218,18 @@ async function drain(
   while (true) {
     const job = nextQueued(queue);
     if (!job) break;
+
+    // Re-check the allowlist at drain time: the enqueue-time decision is cached
+    // (soft TTL) and authoritative membership can change between ack and drain.
+    // A requester revoked after their mention but before we provision is dropped
+    // (terminal), not provisioned — burning ~17 CL calls on a now-unauthorized
+    // request. No reply: a revoked user shouldn't get a provisioned-case link.
+    if (!(await deps.allowlist.has(job.requesterDid))) {
+      queue = markFailed(queue, job.docketId);
+      await saveQueue(deps.queuePath, queue);
+      continue;
+    }
+
     const ledger = await loadLedger(deps.cfg.ledgerPath);
     if (quotaRemaining(ledger, today()) < MIN_QUOTA_FOR_CASE) break; // resume after reset
 
@@ -304,9 +316,10 @@ async function main(): Promise<void> {
     agent.graph as unknown as Parameters<typeof resolveOwnerDid>[0],
     ownerHandle,
   );
+  const allowlistTtlMs = Number(process.env.RCAPE_ALLOWLIST_TTL_MS ?? "60000");
   const deps: BotDeps = {
     agent,
-    allowlist: new AllowlistCache(agent.graph, ownerHandle),
+    allowlist: new AllowlistCache(agent.graph, ownerHandle, allowlistTtlMs),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,

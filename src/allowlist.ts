@@ -93,10 +93,13 @@ export class AllowlistCache {
   private dids = new Set<string>();
   private fetchedAt = 0;
 
+  // 60s default: the drain-time re-check is authoritative, so this TTL is just a
+  // soft cache that bounds how stale an enqueue-time decision can be. Tunable
+  // via RCAPE_ALLOWLIST_TTL_MS at the construction site.
   constructor(
     private readonly client: GraphClient,
     private readonly actor: string,
-    private readonly ttlMs = 5 * 60 * 1000,
+    private readonly ttlMs = 60 * 1000,
   ) {}
 
   async has(did: string): Promise<boolean> {
