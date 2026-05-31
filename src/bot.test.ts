@@ -157,6 +157,70 @@ describe("drain error logging (no credential leak)", () => {
   });
 });
 
+describe("persist-before-reply (no duplicate provision on crash)", () => {
+  it("marks the job terminal before the done-reply, so a crash mid-reply does not re-provision", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      const { agent } = mockAgent([aliceMention()]);
+      let provisionCalls = 0;
+      let doneReplies = 0;
+      // Fail the FIRST done-reply (simulate a crash after persist, before reply).
+      let failNextDoneReply = true;
+      const origReply = agent.reply;
+      agent.reply = async (parent, root, text) => {
+        if (text.includes("@abrego-garcia.rcape.org")) {
+          doneReplies++;
+          if (failNextDoneReply) {
+            failNextDoneReply = false;
+            throw new Error("simulated crash mid-reply");
+          }
+        }
+        return origReply(parent, root, text);
+      };
+      const cfg = {
+        token: "t",
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath,
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg,
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          provisionCalls++;
+          return provisionStub();
+        },
+      };
+
+      // First cycle: enqueue + ack + drain, but the done-reply throws.
+      await expect(pollOnce(deps)).rejects.toThrow("simulated crash mid-reply");
+      // The job was persisted terminal BEFORE the failing reply.
+      const q1 = await loadQueue(queuePath);
+      expect(q1.jobs[0]?.status).toBe("done");
+      expect(provisionCalls).toBe(1);
+
+      // Restart: the mention is already seen and the job is terminal, so the
+      // bot neither re-provisions nor fires a duplicate done-reply.
+      await pollOnce(deps);
+      expect(provisionCalls).toBe(1);
+      // Only the single (failed) done-reply attempt was ever made.
+      expect(doneReplies).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("pollOnce", () => {
   it("skips self, acks + provisions an allowlisted request, and dedupes", async () => {
     const { pollOnce } = await import("./bot.js");

@@ -119,6 +119,12 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       const res = enqueue(queue, job, { perRequesterCap: PER_REQUESTER_CAP });
       if (res.ok) {
         queue = res.queue;
+        // Persist the enqueued job (and the seen marker) BEFORE posting the ack.
+        // A crash after the ack but before this save would otherwise lose the
+        // job entirely, so on restart the mention re-enqueues and re-acks.
+        queue = markSeen(queue, m.uri);
+        await saveQueue(deps.queuePath, queue);
+
         const ackText =
           action.kind === "ack-enqueue"
             ? buildReply({ kind: "ack", docketId: action.docketId })
@@ -128,7 +134,11 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
                 ahead: action.ahead,
               });
         const ackRef = await deps.agent.reply(parent, m.root, ackText);
+        // The ackRef only refines reply threading; a crash here at worst parents
+        // the done-reply on the mention instead of the ack. Persist it best-effort.
         queue = setAck(queue, action.docketId, ackRef);
+        await saveQueue(deps.queuePath, queue);
+        continue;
       }
       // enqueue rejected (duplicate / over cap) → no reply, just mark seen.
     }
@@ -178,6 +188,21 @@ async function drain(
 
     const parent = job.ackRef ?? job.mention;
     const result = await provision(job.docketId, deps.cfg);
+
+    // Persist the terminal state (and save) BEFORE posting the reply. A crash
+    // after a completed provision but before this save would leave the job still
+    // queued, so on restart runProvision reruns, returns "exists", and fires a
+    // duplicate reply. Marking the job terminal first makes the reply at-most-once.
+    if (result.status === "provisioned" || result.status === "exists") {
+      queue = markDone(queue, job.docketId);
+    } else if (result.status === "not-found" || result.status === "error") {
+      queue = markFailed(queue, job.docketId);
+    } else {
+      // quota-exhausted: leave the job queued and resume after the daily reset.
+      break;
+    }
+    await saveQueue(deps.queuePath, queue);
+
     if (result.status === "provisioned") {
       await deps.agent.reply(
         parent,
@@ -188,33 +213,26 @@ async function drain(
           handle: result.handle,
         }),
       );
-      queue = markDone(queue, job.docketId);
     } else if (result.status === "exists") {
       await deps.agent.reply(
         parent,
         job.rootRef,
         buildReply({ kind: "exists", handle: result.handle }),
       );
-      queue = markDone(queue, job.docketId);
     } else if (result.status === "not-found") {
       await deps.agent.reply(
         parent,
         job.rootRef,
         buildReply({ kind: "not-found" }),
       );
-      queue = markFailed(queue, job.docketId);
-    } else if (result.status === "quota-exhausted") {
-      break; // resume after reset
     } else {
-      // error — leave a failed marker; don't spam a reply on transient errors.
-      // Log only the docket id and the status, never result.message: PDS auth
+      // error — failed marker already persisted; don't spam a reply on transient
+      // errors. Log only the docket id and status, never result.message: PDS auth
       // errors can echo credentials, and journald retains them indefinitely.
       console.error(
         `provision failed for docket ${job.docketId}: ${result.status}`,
       );
-      queue = markFailed(queue, job.docketId);
     }
-    await saveQueue(deps.queuePath, queue);
   }
 }
 
