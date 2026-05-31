@@ -4,8 +4,7 @@
 // under the shared free-tier cap. Holds per-case account passwords, so it lives
 // in the gitignored data/ directory.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { loadJson, saveJson } from "./atomicJson.js";
 
 export interface CaseEntry {
   did: string;
@@ -76,19 +75,13 @@ export function chargeQuota(ledger: Ledger, n: number, day: string): Ledger {
 }
 
 export async function loadLedger(path: string): Promise<Ledger> {
-  try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Ledger>;
-    return {
-      cases: parsed.cases ?? {},
-      quota: parsed.quota ?? { day: "", count: 0 },
-    };
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return emptyLedger();
-    throw e;
-  }
+  const parsed = await loadJson<Partial<Ledger>>(path, emptyLedger);
+  return {
+    cases: parsed.cases ?? {},
+    quota: parsed.quota ?? { day: "", count: 0 },
+  };
 }
 
 export async function saveLedger(path: string, ledger: Ledger): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(ledger, null, 2)}\n`);
+  await saveJson(path, ledger);
 }

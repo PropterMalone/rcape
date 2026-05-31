@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DAILY_CAP,
@@ -5,8 +8,10 @@ import {
   chargeQuota,
   emptyLedger,
   findCase,
+  loadLedger,
   quotaRemaining,
   recordCase,
+  saveLedger,
 } from "./ledger.js";
 
 const DAY = "2026-05-30";
@@ -112,5 +117,49 @@ describe("quota (5/min self-throttle aside, 125/day cap)", () => {
     expect(quotaRemaining(l, "2026-05-31")).toBe(DAILY_CAP - 17);
     // The prior day no longer governs the counter.
     expect(quotaRemaining(l, DAY)).toBe(DAILY_CAP);
+  });
+});
+
+describe("crash-safe persistence", () => {
+  it("recovers a recorded case from .bak when ledger.json is truncated", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-ledger-"));
+    try {
+      const path = join(dir, "ledger.json");
+      const l1 = recordCase(emptyLedger(), 1, {
+        did: "did:plc:one",
+        handle: "one.rcape.org",
+        password: "pw-one",
+        createdAt: DAY,
+      });
+      await saveLedger(path, l1);
+      // Second save populates .bak with the first good state.
+      const l2 = recordCase(l1, 2, {
+        did: "did:plc:two",
+        handle: "two.rcape.org",
+        password: "pw-two",
+        createdAt: DAY,
+      });
+      await saveLedger(path, l2);
+      // Crash mid-write leaves a torn primary file.
+      await writeFile(path, '{"cases": {"1": {"did": "did:plc:on');
+      const recovered = await loadLedger(path);
+      // Falls back to .bak (the single-case state), not a throw or empty reset.
+      expect(findCase(recovered, 1)?.password).toBe("pw-one");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("saves via temp+rename so the primary is never left truncated", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-ledger-"));
+    try {
+      const path = join(dir, "ledger.json");
+      await saveLedger(path, emptyLedger());
+      // No leftover temp file; primary parses cleanly.
+      expect(await readdir(dir)).not.toContain("ledger.json.tmp");
+      JSON.parse(await readFile(path, "utf8"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

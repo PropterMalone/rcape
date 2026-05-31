@@ -3,8 +3,7 @@
 // under the CL daily budget. Also tracks processed notification URIs so each
 // mention is handled exactly once across restarts. Lives in gitignored data/.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { loadJson, saveJson } from "./atomicJson.js";
 
 export interface StrongRef {
   uri: string;
@@ -105,18 +104,10 @@ export function markSeen(q: QueueState, uri: string): QueueState {
 }
 
 export async function loadQueue(path: string): Promise<QueueState> {
-  try {
-    const parsed = JSON.parse(
-      await readFile(path, "utf8"),
-    ) as Partial<QueueState>;
-    return { jobs: parsed.jobs ?? [], seen: parsed.seen ?? [] };
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return emptyQueue();
-    throw e;
-  }
+  const parsed = await loadJson<Partial<QueueState>>(path, emptyQueue);
+  return { jobs: parsed.jobs ?? [], seen: parsed.seen ?? [] };
 }
 
 export async function saveQueue(path: string, q: QueueState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(q, null, 2)}\n`);
+  await saveJson(path, q);
 }
