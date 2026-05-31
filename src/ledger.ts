@@ -48,15 +48,25 @@ export function recordCase(
 ): Ledger {
   const prior = ledger.cases[String(docketId)];
   let toStore = entry;
-  if (prior && prior.did !== entry.did) {
-    // Different DID at the same docket = a --force re-provision displaced the
-    // old account. Archive it (flattened) so its credentials survive.
+  // A genuinely different DID (the incoming entry names one and it differs from
+  // prior) means a --force re-provision displaced the old account. A partial
+  // update that omits `did` is NOT a DID change.
+  const isForceReprovision = prior && entry.did && prior.did !== entry.did;
+  if (isForceReprovision) {
+    // Archive the displaced account (flattened) so its credentials survive. A
+    // force re-provision is a full fresh entry, so no merge over prior.
     const { superseded: priorArchive, ...priorRest } = prior;
     toStore = { ...entry, superseded: [...(priorArchive ?? []), priorRest] };
-  } else if (prior?.superseded && !entry.superseded) {
-    // Same DID = an in-place update (e.g. the post-backfill highWater write).
-    // Preserve any existing archive across the update.
-    toStore = { ...entry, superseded: prior.superseded };
+  } else if (prior) {
+    // Same-DID / partial update (e.g. a watched-case monitor writing only
+    // highWater): merge over the prior entry so fields absent from `entry` —
+    // notably the irreplaceable password — are never clobbered. Then re-apply
+    // the superseded-preservation rule (a partial update never sets it).
+    toStore = {
+      ...prior,
+      ...entry,
+      superseded: entry.superseded ?? prior.superseded,
+    };
   }
   return {
     ...ledger,

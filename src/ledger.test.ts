@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  type CaseEntry,
   DAILY_CAP,
   type Ledger,
   chargeQuota,
@@ -76,6 +77,23 @@ describe("findCase / recordCase", () => {
     const found = findCase(l, 1);
     expect(found?.highWater).toBe("099");
     expect(found?.superseded).toBeUndefined();
+  });
+
+  it("merges a partial same-DID update so omitted fields are not clobbered", () => {
+    let l = recordCase(emptyLedger(), 1, {
+      did: "did:plc:x",
+      handle: "h.rcape.org",
+      password: "irreplaceable-pw",
+      createdAt: DAY,
+    });
+    // A future partial-update caller (watched-case monitor) writes only the new
+    // highWater. The merge must preserve the password + createdAt + handle.
+    l = recordCase(l, 1, { highWater: "099" } as unknown as CaseEntry);
+    const found = findCase(l, 1);
+    expect(found?.highWater).toBe("099");
+    expect(found?.password).toBe("irreplaceable-pw");
+    expect(found?.createdAt).toBe(DAY);
+    expect(found?.handle).toBe("h.rcape.org");
   });
 });
 
