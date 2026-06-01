@@ -72,6 +72,34 @@ describe("saveJson / loadJson", () => {
       CorruptStateError,
     );
   });
+
+  it("recovers from .bak when the primary is MISSING (deleted out-of-band), not just corrupt", async () => {
+    const path = join(dir, "state.json");
+    await saveJson(path, { v: 1 });
+    await saveJson(path, { v: 2 }); // .bak now holds {v:1}
+    // Primary vanishes entirely (rm, a rename that left it absent, disk gremlin).
+    await rm(path);
+    const loaded = await loadJson(path, () => ({ v: 0 }));
+    // Recover from .bak rather than booting the fallback (which for the ledger
+    // would reset quota + drop every case password).
+    expect(loaded).toEqual({ v: 1 });
+  });
+
+  it("returns the fallback only when BOTH primary and .bak are absent (genuinely fresh)", async () => {
+    const path = join(dir, "state.json");
+    expect(await loadJson(path, () => ({ fresh: true }))).toEqual({
+      fresh: true,
+    });
+  });
+
+  it("throws CorruptStateError when the primary is missing and .bak is unreadable", async () => {
+    const path = join(dir, "state.json");
+    // .bak exists (state DID exist) but is corrupt — don't silently reset.
+    await writeFile(`${path}.bak`, "garbage {");
+    await expect(loadJson(path, () => ({}))).rejects.toBeInstanceOf(
+      CorruptStateError,
+    );
+  });
 });
 
 describe("withLock / mutateJson (cross-process write safety)", () => {

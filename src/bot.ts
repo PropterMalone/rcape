@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
+import { parseClTokens } from "./courtlistener.js";
 import { type MentionFacet, mentionFacets } from "./facet.js";
-import { findCase, loadLedger, quotaRemaining } from "./ledger.js";
+import { findCase, loadLedger, selectToken } from "./ledger.js";
 import { parseMention } from "./mention.js";
 import {
   type ProvisionConfig,
@@ -24,6 +25,7 @@ import {
   enqueue,
   findJob,
   hasSeen,
+  isActive,
   loadQueue,
   markDone,
   markFailed,
@@ -222,6 +224,7 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
           buildReply({
             kind: "over-cap",
             inFlight: perRequesterQueued(queue, m.authorDid),
+            docketId: action.docketId,
           }),
         );
         continue;
@@ -265,16 +268,25 @@ async function classifyMention(
   const ledger = await loadLedger(deps.cfg.ledgerPath);
   const existing =
     "docketId" in parsed ? findCase(ledger, parsed.docketId) : undefined;
+  // Only a COMPLETED case dedupes to "already provisioned". A present-but-
+  // incomplete entry is a crash zombie (handle doesn't resolve yet) — let it fall
+  // through to enqueue so the drain re-runs runProvision, which RESUMES it.
+  const completed = existing?.completed ? existing : undefined;
   const queuedJob =
     "docketId" in parsed ? findJob(queue, parsed.docketId) : undefined;
-  const alreadyQueued = queuedJob?.status === "queued";
-  const quotaOk = quotaRemaining(ledger, today()) >= MIN_QUOTA_FOR_CASE;
+  // A re-mention is "already queued" when the existing job is still active —
+  // queued OR backing off a retry. Keying on status === "queued" alone let a
+  // re-mention of a retrying docket fall through to a redundant enqueue attempt.
+  const alreadyQueued = queuedJob ? isActive(queuedJob) : false;
+  const quotaOk =
+    selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE) !==
+    undefined;
   const queueAhead = queue.jobs.filter((j) => j.status === "queued").length;
   return classify({
     allowed,
     parsed,
-    existingHandle: existing?.handle,
-    existingDid: existing?.did,
+    existingHandle: completed?.handle,
+    existingDid: completed?.did,
     alreadyQueued,
     quotaOk,
     queueAhead,
@@ -307,7 +319,11 @@ async function drain(
     // is the bot's own single-writer in-memory authority, so re-reading it per
     // iteration would just re-load what we already hold.
     const ledger = await loadLedger(deps.cfg.ledgerPath);
-    if (quotaRemaining(ledger, today()) < MIN_QUOTA_FOR_CASE) break; // resume after reset
+    // No token in the pool has room for a whole case → stop draining; resume
+    // after the daily reset (or once an in-flight reservation reconciles down).
+    if (!selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE)) {
+      break;
+    }
 
     const parent = job.ackRef ?? job.mention;
     const result = await provision(job.docketId, deps.cfg);
@@ -407,7 +423,7 @@ async function main(): Promise<void> {
     password: env("RCAPE_BOT_PASSWORD"),
   });
   const cfg: ProvisionConfig = {
-    token: env("COURTLISTENER_API_TOKEN"),
+    tokens: parseClTokens(),
     host,
     domain: process.env.RCAPE_HANDLE_DOMAIN ?? "rcape.org",
     hashN: Number(process.env.RCAPE_HASH_FIRST_N ?? "15"),

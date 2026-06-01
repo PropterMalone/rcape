@@ -40,6 +40,13 @@ describe("upsertAtprotoTxt", () => {
       content: "did=did:plc:abc",
       ttl: 60,
     });
+    // The lookup must use the documented dot-notation exact filter, not the
+    // silently-ignored `name[exact]` bracket form (which returns every TXT
+    // record and risks overwriting an unrelated one). encodeURIComponent leaves
+    // dots/underscores literal, so the name appears verbatim.
+    const get = calls.find((c) => c.method === "GET");
+    expect(get?.url).toContain("name.exact=_atproto.smith.rcape.org");
+    expect(get?.url).not.toContain("name[exact]");
   });
 
   it("updates the existing record (PUT) when one is present", async () => {

@@ -20,7 +20,6 @@ import {
   rename,
   stat,
   unlink,
-  writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -41,14 +40,41 @@ function isEnoent(e: unknown): boolean {
   return (e as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-// Atomic write: serialize → write temp → rename over target. The prior good
-// target (if any) is copied to <path>.bak before the rename, so a corrupt
-// primary on next boot has a recovery source. mkdir is recursive so a fresh
-// data/ dir is created on first save.
+// fsync a directory so a rename within it is durable across power loss. Not
+// supported on every platform/filesystem (Windows errors), so failures degrade
+// silently — the rename is still atomic, just not guaranteed flushed.
+async function syncDir(dir: string): Promise<void> {
+  try {
+    const dh = await open(dir, "r");
+    try {
+      await dh.sync();
+    } finally {
+      await dh.close();
+    }
+  } catch {
+    /* directory fsync unsupported here; rename atomicity still holds */
+  }
+}
+
+// Atomic write: serialize → write temp (fsynced) → rename over target → fsync
+// dir. The prior good target (if any) is copied to <path>.bak before the rename,
+// so a corrupt primary on next boot has a recovery source. fsync of the temp
+// before the rename, and of the parent dir after, are what make the header's
+// "never a torn/zero-length file after power loss" guarantee real: without them
+// the rename can be ordered before the data hits disk, leaving a zero-length or
+// stale primary after a panic. mkdir is recursive so a fresh data/ dir is made
+// on first save.
 export async function saveJson<T>(path: string, value: T): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true });
   const tmp = `${path}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  const fh = await open(tmp, "w");
+  try {
+    await fh.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await fh.sync(); // flush temp contents to disk BEFORE it's renamed into place
+  } finally {
+    await fh.close();
+  }
   try {
     await copyFile(path, `${path}.bak`);
   } catch (e) {
@@ -56,34 +82,55 @@ export async function saveJson<T>(path: string, value: T): Promise<void> {
     if (!isEnoent(e)) throw e;
   }
   await rename(tmp, path);
+  await syncDir(dir);
 }
 
-// Atomic read with recovery: parse the primary; on a parse error (torn file),
-// fall back to <path>.bak. ENOENT on the primary returns the caller's default
-// (fresh state). If the primary is present-but-corrupt and .bak is missing or
-// also corrupt, throw CorruptStateError — never silently reset.
+// Read + parse <path>.bak. Returns the parsed value boxed in { value }, or
+// undefined when no .bak exists; throws CorruptStateError if .bak is present but
+// won't parse. Boxing distinguishes "no .bak" from a .bak that legitimately
+// holds a falsy value.
+async function loadBak<T>(path: string): Promise<{ value: T } | undefined> {
+  let bak: string;
+  try {
+    bak = await readFile(`${path}.bak`, "utf8");
+  } catch (e) {
+    if (isEnoent(e)) return undefined;
+    throw e;
+  }
+  try {
+    return { value: JSON.parse(bak) as T };
+  } catch (bakErr) {
+    throw new CorruptStateError(path, bakErr);
+  }
+}
+
+// Atomic read with recovery. Two failure modes both fall back to <path>.bak:
+//   - primary present but unparseable (a torn mid-write file), AND
+//   - primary MISSING (deleted out-of-band, or a rename that left it absent).
+// The original code only recovered from the first, so an out-of-band primary
+// loss booted the caller's fallback — for the ledger that means resetting the
+// quota counter and dropping every case password. .bak (the prior good state)
+// is consulted in both cases. Only a genuinely fresh store (no primary AND no
+// .bak) returns the fallback; a missing/corrupt primary with an UNREADABLE .bak
+// throws CorruptStateError rather than silently resetting.
 export async function loadJson<T>(path: string, fallback: () => T): Promise<T> {
   let primary: string;
   try {
     primary = await readFile(path, "utf8");
   } catch (e) {
-    if (isEnoent(e)) return fallback();
-    throw e;
+    if (!isEnoent(e)) throw e;
+    // Primary missing: recover from .bak if it exists, else genuinely fresh.
+    const recovered = await loadBak<T>(path);
+    return recovered ? recovered.value : fallback();
   }
   try {
     return JSON.parse(primary) as T;
   } catch (parseErr) {
-    let bak: string;
-    try {
-      bak = await readFile(`${path}.bak`, "utf8");
-    } catch {
-      throw new CorruptStateError(path, parseErr);
-    }
-    try {
-      return JSON.parse(bak) as T;
-    } catch (bakErr) {
-      throw new CorruptStateError(path, bakErr);
-    }
+    // Primary torn: .bak is the only recovery source. Unlike a missing primary,
+    // a missing .bak here is unrecoverable — we KNOW state existed.
+    const recovered = await loadBak<T>(path);
+    if (!recovered) throw new CorruptStateError(path, parseErr);
+    return recovered.value;
   }
 }
 

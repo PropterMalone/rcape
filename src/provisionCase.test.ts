@@ -1,13 +1,23 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MappedCase } from "./build.js";
+import type { CaseRepo } from "./caseRepo.js";
 import type { CourtListenerClient } from "./courtlistener.js";
-import { emptyLedger, loadLedger, saveLedger } from "./ledger.js";
+import {
+  type CaseEntry,
+  emptyLedger,
+  findCase,
+  loadLedger,
+  recordCase,
+  saveLedger,
+  tokenId,
+} from "./ledger.js";
 import {
   type ProvisionConfig,
   postedHighWater,
+  provisionMode,
   runProvision,
 } from "./provisionCase.js";
 
@@ -21,7 +31,7 @@ afterEach(async () => {
 
 function cfg(ledgerPath: string): ProvisionConfig {
   return {
-    token: "t",
+    tokens: ["t"],
     domain: "rcape.org",
     hashN: 0,
     adminPassword: "",
@@ -54,7 +64,8 @@ describe("runProvision incremental quota", () => {
     const result = await runProvision(123, cfg(ledgerPath), {
       makeClient: () => clientWithCount(SPENT),
       mapCase: async () => {
-        durableAtCrash = (await loadLedger(ledgerPath)).quota.count;
+        durableAtCrash =
+          (await loadLedger(ledgerPath)).quota.counts[tokenId("t")] ?? 0;
         throw new Error("simulated crash mid-fetch");
       },
     });
@@ -66,7 +77,9 @@ describe("runProvision incremental quota", () => {
     // After the catch reconciles, the durable counter reflects the real spend.
     const ledger = await loadLedger(ledgerPath);
     expect(ledger.quota.day).toBe(DAY);
-    expect(ledger.quota.count).toBeGreaterThanOrEqual(SPENT);
+    expect(ledger.quota.counts[tokenId("t")] ?? 0).toBeGreaterThanOrEqual(
+      SPENT,
+    );
   });
 
   it("reconciles down to the real call count on a successful fetch", async () => {
@@ -93,7 +106,165 @@ describe("runProvision incremental quota", () => {
 
     const ledger = await loadLedger(ledgerPath);
     // Reservation (17) reconciled down to the actual 13 calls.
-    expect(ledger.quota.count).toBe(ACTUAL);
+    expect(ledger.quota.counts[tokenId("t")] ?? 0).toBe(ACTUAL);
+  });
+});
+
+function mockRepo(overrides: Partial<Record<string, unknown>> = {}): CaseRepo {
+  return {
+    did: "did:plc:zombie",
+    handle: "zombie.rcape.org",
+    applyCreates: vi.fn(async () => {}),
+    // Pretend each queried collection has one leftover record, so a resume
+    // exercises the reset (applyDeletes) path.
+    collect: vi.fn(async () => [{ rkey: "old1", uri: "", cid: "", value: {} }]),
+    applyDeletes: vi.fn(async () => {}),
+    ...overrides,
+  } as unknown as CaseRepo;
+}
+
+describe("provisionMode", () => {
+  const entry = (over: Partial<CaseEntry> = {}): CaseEntry => ({
+    did: "d",
+    handle: "h",
+    password: "p",
+    createdAt: "x",
+    ...over,
+  });
+  it("is fresh when there is no existing entry", () => {
+    expect(provisionMode(undefined, false).kind).toBe("fresh");
+  });
+  it("is exists when the entry is completed and --force is not set", () => {
+    expect(provisionMode(entry({ completed: true }), false).kind).toBe(
+      "exists",
+    );
+  });
+  it("is force-mint when the entry is completed and --force is set", () => {
+    expect(provisionMode(entry({ completed: true }), true).kind).toBe(
+      "force-mint",
+    );
+  });
+  it("is resume for a present-but-incomplete entry (crash zombie), regardless of --force", () => {
+    expect(provisionMode(entry(), false).kind).toBe("resume");
+    expect(provisionMode(entry(), true).kind).toBe("resume");
+  });
+});
+
+describe("runProvision dedupe / resume", () => {
+  it("dedupes a completed entry without re-fetching the case", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(
+      ledgerPath,
+      recordCase(emptyLedger(), 123, {
+        did: "did:plc:done",
+        handle: "done.rcape.org",
+        password: "pw",
+        createdAt: DAY,
+        completed: true,
+      }),
+    );
+    const mapCase = vi.fn();
+    const result = await runProvision(123, cfg(ledgerPath), {
+      makeClient: () => clientWithCount(0),
+      mapCase: mapCase as never,
+    });
+    expect(result.status).toBe("exists");
+    if (result.status === "exists")
+      expect(result.handle).toBe("done.rcape.org");
+    // The whole point: a completed entry never re-fetches or re-mints.
+    expect(mapCase).not.toHaveBeenCalled();
+  });
+
+  it("resumes a crash-incomplete (zombie) entry rather than reporting it provisioned", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    // Credentials persisted early, but no `completed` flag: the crash hit before
+    // DNS/records/backfill finished. The OLD code returned `exists` here.
+    await saveLedger(
+      ledgerPath,
+      recordCase(emptyLedger(), 123, {
+        did: "did:plc:zombie",
+        handle: "zombie.rcape.org",
+        password: "pw-z",
+        createdAt: DAY,
+      }),
+    );
+
+    const repo = mockRepo();
+    const makeAccount = vi.fn();
+    const result = await runProvision(123, cfg(ledgerPath), {
+      makeClient: () => clientWithCount(17),
+      mapCase: async () =>
+        ({
+          docketRecord: { caseName: "Doe v. Roe", docketNumber: "1:23-cv-1" },
+          entryRecords: [],
+          parties: [],
+          records: [
+            {
+              collection: "org.rcape.docketEntry",
+              rkey: "e1",
+              record: { recapSequenceNumber: "001" },
+            },
+          ],
+        }) as unknown as MappedCase,
+      makeAccount: makeAccount as never,
+      upsertDns: (async () => ({ created: false })) as never,
+      loginRepo: async () => repo,
+      backfill: async () => ({ published: 1, failed: [] }),
+    });
+
+    expect(result.status).toBe("provisioned");
+    // Reused the stored handle — did NOT mint a fresh account.
+    if (result.status === "provisioned") {
+      expect(result.handle).toBe("zombie.rcape.org");
+    }
+    expect(makeAccount).not.toHaveBeenCalled();
+    // Reset the half-written repo (deleted leftovers) then rebuilt it.
+    expect(repo.applyDeletes).toHaveBeenCalled();
+    expect(repo.applyCreates).toHaveBeenCalled();
+    // Now flagged completed, so a future re-run dedupes correctly.
+    expect(findCase(await loadLedger(ledgerPath), 123)?.completed).toBe(true);
+  });
+
+  it("mints a second account under --force on a completed entry, archiving the first", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(
+      ledgerPath,
+      recordCase(emptyLedger(), 123, {
+        did: "did:plc:first",
+        handle: "smith.rcape.org",
+        password: "pw1",
+        createdAt: DAY,
+        completed: true,
+      }),
+    );
+    const repo = mockRepo({ did: "did:plc:second" });
+    const result = await runProvision(123, cfg(ledgerPath), {
+      force: true,
+      makeClient: () => clientWithCount(17),
+      mapCase: async () =>
+        ({
+          docketRecord: {
+            caseName: "Smith v. Jones",
+            docketNumber: "1:23-cv-9",
+          },
+          entryRecords: [],
+          parties: [],
+          records: [],
+        }) as unknown as MappedCase,
+      makeAccount: (async (o: { handle: string; password: string }) => ({
+        did: "did:plc:second",
+        handle: o.handle,
+        password: o.password,
+      })) as never,
+      upsertDns: (async () => ({ created: true })) as never,
+      loginRepo: async () => repo,
+      backfill: async () => ({ published: 0, failed: [] }),
+    });
+    expect(result.status).toBe("provisioned");
+    const entry = findCase(await loadLedger(ledgerPath), 123);
+    expect(entry?.did).toBe("did:plc:second");
+    expect(entry?.completed).toBe(true);
+    expect(entry?.superseded?.[0]?.did).toBe("did:plc:first");
   });
 });
 

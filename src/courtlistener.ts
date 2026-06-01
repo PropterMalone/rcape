@@ -10,7 +10,28 @@ import type {
   ClParty,
 } from "./courtlistener.types.js";
 
+// Parse the configured CourtListener token pool. COURTLISTENER_API_TOKENS
+// (comma-separated) is the pool; the legacy single COURTLISTENER_API_TOKEN is
+// the fallback, so existing one-token deployments keep working unchanged. Each
+// token carries its own 125/day budget — adding tokens raises the ceiling.
+export function parseClTokens(env: NodeJS.ProcessEnv = process.env): string[] {
+  const multi = (env.COURTLISTENER_API_TOKENS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (multi.length > 0) return [...new Set(multi)];
+  const single = env.COURTLISTENER_API_TOKEN?.trim();
+  if (single) return [single];
+  throw new Error(
+    "COURTLISTENER_API_TOKENS (or COURTLISTENER_API_TOKEN) not set",
+  );
+}
+
 const BASE = "https://www.courtlistener.com/api/rest/v4";
+// Every request carries the API token in an Authorization header, so an absolute
+// URL (the response-body `next` pagination link) must be pinned to this origin —
+// a crafted/compromised `next` pointing elsewhere would leak the token.
+const CL_ORIGIN = new URL(BASE).origin; // https://www.courtlistener.com
 const MAX_PAGES = 50;
 
 const sleep = (ms: number): Promise<void> =>
@@ -43,7 +64,20 @@ export class CourtListenerClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const url = path.startsWith("http") ? path : `${BASE}${path}`;
+    let url: string;
+    if (path.startsWith("http")) {
+      // An absolute URL only ever comes from a response `next` link. Pin it to
+      // CourtListener's origin before attaching the token (SSRF / token-leak).
+      const parsed = new URL(path);
+      if (parsed.origin !== CL_ORIGIN) {
+        throw new Error(
+          `CourtListener: refusing to follow off-host URL (${parsed.origin}); pagination must stay on ${CL_ORIGIN}`,
+        );
+      }
+      url = path;
+    } else {
+      url = `${BASE}${path}`;
+    }
     this._requestCount += 1;
     for (let attempt = 0; attempt < 5; attempt++) {
       await this.throttle();

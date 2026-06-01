@@ -10,6 +10,7 @@
 // clobber a concurrent writer's quota charge or recordCase entry — use it only
 // for a from-scratch write (tests/init), never for an increment/merge.
 
+import { createHash } from "node:crypto";
 import { loadJson, mutateJson, saveJson } from "./atomicJson.js";
 
 export interface CaseEntry {
@@ -17,6 +18,11 @@ export interface CaseEntry {
   handle: string;
   password: string;
   createdAt: string;
+  // Set true ONLY by the terminal recordCase, after DNS + records + backfill all
+  // succeed. A present-but-incomplete entry is a crash zombie (credentials were
+  // persisted early so the account/password isn't orphaned), NOT a finished case:
+  // the dedupe guard must resume it, not report it as already provisioned.
+  completed?: boolean;
   // High-water recapSequenceNumber for the (future) watched-case monitor.
   highWater?: string;
   // rkeys whose backdated doc-post failed during backfill — entries that exist
@@ -30,14 +36,23 @@ export interface CaseEntry {
 
 export interface Ledger {
   cases: Record<string, CaseEntry>;
-  quota: { day: string; count: number };
+  // Per-token daily request counters. CourtListener's 125/day cap is PER TOKEN,
+  // so a pool of N tokens gives N independent daily budgets. `counts` is keyed
+  // by a non-secret token fingerprint (tokenId); all counters reset on a new day.
+  quota: { day: string; counts: Record<string, number> };
 }
 
-// CourtListener free tier: 125 requests/day per token, shared across all cases.
+// CourtListener free tier: 125 requests/day per token.
 export const DAILY_CAP = 125;
 
+// Stable, non-secret fingerprint of a CL token, used as the per-token quota key
+// so the raw token never lands in the (credential-bearing but still) ledger.
+export function tokenId(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
 export function emptyLedger(): Ledger {
-  return { cases: {}, quota: { day: "", count: 0 } };
+  return { cases: {}, quota: { day: "", counts: {} } };
 }
 
 export function findCase(
@@ -54,10 +69,11 @@ export function recordCase(
 ): Ledger {
   const prior = ledger.cases[String(docketId)];
   let toStore = entry;
-  // A genuinely different DID (the incoming entry names one and it differs from
-  // prior) means a --force re-provision displaced the old account. A partial
-  // update that omits `did` is NOT a DID change.
-  const isForceReprovision = prior && entry.did && prior.did !== entry.did;
+  // A genuinely different DID (the incoming entry names one AND prior already had
+  // one that differs) means a --force re-provision displaced the old account.
+  // A partial update that omits `did`, or filling in the DID on a credentials-
+  // first pending entry (prior.did absent), is NOT a force re-provision.
+  const isForceReprovision = prior?.did && entry.did && prior.did !== entry.did;
   if (isForceReprovision) {
     // Archive the displaced account (flattened) so its credentials survive. A
     // force re-provision is a full fresh entry, so no merge over prior.
@@ -80,20 +96,70 @@ export function recordCase(
   };
 }
 
-export function quotaRemaining(ledger: Ledger, day: string): number {
-  const used = ledger.quota.day === day ? ledger.quota.count : 0;
+// Every handle the ledger considers spoken-for: the live case handles AND the
+// handles of superseded (--force-displaced) accounts, which still exist on the
+// PDS with their DNS TXT. deriveHandle must avoid all of them — re-issuing a
+// superseded handle would let a fresh case overwrite a still-live account's TXT.
+export function takenHandles(ledger: Ledger): Set<string> {
+  const taken = new Set<string>();
+  for (const c of Object.values(ledger.cases)) {
+    taken.add(c.handle);
+    for (const s of c.superseded ?? []) taken.add(s.handle);
+  }
+  return taken;
+}
+
+// Requests left today for ONE token. A different day means that token's counter
+// has reset (counters are scoped to quota.day).
+export function quotaRemaining(
+  ledger: Ledger,
+  day: string,
+  token: string,
+): number {
+  const used =
+    ledger.quota.day === day ? (ledger.quota.counts[tokenId(token)] ?? 0) : 0;
   return Math.max(0, DAILY_CAP - used);
 }
 
-export function chargeQuota(ledger: Ledger, n: number, day: string): Ledger {
-  const used = ledger.quota.day === day ? ledger.quota.count : 0;
-  return { ...ledger, quota: { day, count: used + n } };
+// Charge `n` requests against ONE token for `day`. A new day resets every
+// token's counter (counts is rebuilt empty) before applying this charge.
+export function chargeQuota(
+  ledger: Ledger,
+  n: number,
+  day: string,
+  token: string,
+): Ledger {
+  const sameDay = ledger.quota.day === day;
+  const counts = sameDay ? { ...ledger.quota.counts } : {};
+  const id = tokenId(token);
+  counts[id] = (counts[id] ?? 0) + n;
+  return { ...ledger, quota: { day, counts } };
+}
+
+// Pick the first configured token with at least `need` requests left today, or
+// undefined when every token is exhausted. A single case must run end-to-end on
+// ONE token (CL pagination carries the token), so headroom can't be pooled
+// across tokens — we need one token that can cover the whole case.
+export function selectToken(
+  ledger: Ledger,
+  tokens: string[],
+  day: string,
+  need: number,
+): string | undefined {
+  return tokens.find((t) => quotaRemaining(ledger, day, t) >= need);
+}
+
+function normalizeQuota(q: {
+  day?: string;
+  counts?: Record<string, number>;
+}): Ledger["quota"] {
+  return { day: q?.day ?? "", counts: q?.counts ?? {} };
 }
 
 function normalize(parsed: Partial<Ledger>): Ledger {
   return {
     cases: parsed.cases ?? {},
-    quota: parsed.quota ?? { day: "", count: 0 },
+    quota: normalizeQuota(parsed.quota ?? {}),
   };
 }
 

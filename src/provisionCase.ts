@@ -10,25 +10,30 @@
 import { fileURLToPath } from "node:url";
 import { fetchAndMapCase } from "./build.js";
 import { CaseRepo } from "./caseRepo.js";
-import { CourtListenerClient } from "./courtlistener.js";
-import { upsertAtprotoTxt } from "./dns.js";
-import { fireBackfill } from "./fire.js";
+import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
+import { type DnsOptions, upsertAtprotoTxt } from "./dns.js";
+import { type FireResult, fireBackfill } from "./fire.js";
 import { deriveHandle } from "./handle.js";
 import {
+  type CaseEntry,
   type Ledger,
   chargeQuota,
   findCase,
   loadLedger,
   mutateLedger,
-  quotaRemaining,
   recordCase,
+  selectToken,
+  takenHandles,
 } from "./ledger.js";
 import { parseDocketId } from "./mention.js";
+import type { NewAccount } from "./provision.js";
 import { createCaseAccount, generatePassword } from "./provision.js";
 import { prune } from "./repo.js";
 
 export interface ProvisionConfig {
-  token: string;
+  // Pool of CourtListener tokens. Each has its own 125/day cap; a case runs on
+  // whichever has headroom (selectToken). One token = the old single-token cap.
+  tokens: string[];
   host?: string;
   domain: string;
   hashN: number;
@@ -45,13 +50,31 @@ export interface ProvisionConfig {
 // crash loses every counted call and the re-run double-spends the shared cap.
 const RESERVED_CALLS_PER_CASE = 17;
 
-// Seams for testing the crash-mid-fetch path without a live CL call. Both
-// default to the real implementations in production.
+// Seams for testing without live CL / PDS / DNS / posting. All default to the
+// real implementations in production.
 type MakeClient = (token: string) => CourtListenerClient;
 type MapCase = (
   opts: { docketId: number; token: string; hashFirstNEntries: number },
   client: CourtListenerClient,
 ) => ReturnType<typeof fetchAndMapCase>;
+type MakeAccount = (opts: {
+  host?: string;
+  adminPassword: string;
+  handle: string;
+  email: string;
+  password: string;
+}) => Promise<NewAccount>;
+type UpsertDns = (
+  handle: string,
+  did: string,
+  opts: DnsOptions,
+) => Promise<{ created: boolean }>;
+type LoginRepo = (opts: {
+  host?: string;
+  identifier: string;
+  password: string;
+}) => Promise<CaseRepo>;
+type Backfill = (repo: CaseRepo) => Promise<FireResult>;
 
 export type ProvisionResult =
   | {
@@ -75,6 +98,31 @@ export type ProvisionResult =
   | { status: "error"; message: string };
 
 const ENTRY_COLLECTION = "org.rcape.docketEntry";
+const POST_COLLECTION = "app.bsky.feed.post";
+
+export type ProvisionMode =
+  | { kind: "fresh" }
+  | { kind: "exists" }
+  | { kind: "resume" }
+  | { kind: "force-mint" };
+
+// pattern: Functional Core
+// Decide how to handle a provision request from the existing ledger entry (if
+// any) and whether --force was passed. The load-bearing case is `resume`: a
+// present-but-incomplete entry is a CRASH ZOMBIE — credentials were persisted
+// early (so the account/password isn't orphaned) before DNS/records/backfill
+// finished, then the process died. Treating its mere presence as "already
+// provisioned" (the original bug) reports a handle that doesn't resolve as done;
+// it must be repaired in place instead. A completed entry dedupes, or mints a
+// second account under --force.
+export function provisionMode(
+  existing: CaseEntry | undefined,
+  force: boolean,
+): ProvisionMode {
+  if (!existing) return { kind: "fresh" };
+  if (!existing.completed) return { kind: "resume" };
+  return force ? { kind: "force-mint" } : { kind: "exists" };
+}
 
 // pattern: Functional Core
 // The high-water sequence number is the max recapSequenceNumber among entries
@@ -107,15 +155,40 @@ async function reconcileQuota(
   ledgerPath: string,
   actualCalls: number,
   day: string,
+  token: string,
 ): Promise<Ledger> {
   return mutateLedger(ledgerPath, (fresh) =>
-    chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day),
+    chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day, token),
   );
 }
 
+// Wipe a half-provisioned repo back to a clean slate before re-applying records
+// and re-firing the backfill on a RESUME. applyWrites#create errors on an
+// already-present rkey and fireBackfill refuses when any post exists, so a
+// crash mid-write leaves the account un-reprovisionable in place; deleting the
+// rcape record collections + all posts (the profile is overwritten by the
+// backfill, not deleted) makes the rebuild idempotent.
+async function resetRepo(
+  repo: CaseRepo,
+  rows: { collection: string }[],
+): Promise<void> {
+  const collections = new Set(rows.map((r) => r.collection));
+  collections.add(POST_COLLECTION);
+  for (const collection of collections) {
+    const existing = await repo.collect(collection);
+    if (existing.length > 0) {
+      await repo.applyDeletes(
+        existing.map((r) => ({ collection, rkey: r.rkey })),
+      );
+    }
+  }
+}
+
 // Provision a case end-to-end, in-process. Callable by both the operator CLI
-// (main, below) and the @-mention bot. Reuses the early-persist + archive +
-// quota logic; returns a discriminated result the caller maps to output/replies.
+// (main, below) and the @-mention bot. Handles four modes (see provisionMode):
+// dedupe a completed case, RESUME a crash zombie in place, mint fresh, or mint a
+// second account under --force. Returns a discriminated result the caller maps
+// to output/replies.
 export async function runProvision(
   docketId: number,
   cfg: ProvisionConfig,
@@ -124,55 +197,84 @@ export async function runProvision(
     dryRun?: boolean;
     makeClient?: MakeClient;
     mapCase?: MapCase;
+    makeAccount?: MakeAccount;
+    upsertDns?: UpsertDns;
+    loginRepo?: LoginRepo;
+    backfill?: Backfill;
   } = {},
 ): Promise<ProvisionResult> {
-  let ledger = await loadLedger(cfg.ledgerPath);
+  const makeAccount = opts.makeAccount ?? createCaseAccount;
+  const upsertDns = opts.upsertDns ?? upsertAtprotoTxt;
+  const loginRepo = opts.loginRepo ?? ((o) => CaseRepo.login(o));
+  const backfill = opts.backfill ?? ((repo) => fireBackfill(repo));
 
+  let ledger = await loadLedger(cfg.ledgerPath);
   const existing = findCase(ledger, docketId);
-  if (existing && !opts.force) {
-    return { status: "exists", handle: existing.handle, did: existing.did };
+  const mode = provisionMode(existing, opts.force ?? false);
+
+  if (mode.kind === "exists") {
+    // existing is defined and completed in this branch.
+    const done = existing as CaseEntry;
+    return { status: "exists", handle: done.handle, did: done.did };
   }
 
   const day = new Date().toISOString().slice(0, 10);
-  if (quotaRemaining(ledger, day) <= 0) {
+  // Pick a token from the pool with room for a whole case. None → the shared
+  // budget is spent for the day across every token.
+  const token = selectToken(ledger, cfg.tokens, day, RESERVED_CALLS_PER_CASE);
+  if (!token) {
     return { status: "quota-exhausted", day };
   }
 
   const client = (opts.makeClient ?? ((t) => new CourtListenerClient(t)))(
-    cfg.token,
+    token,
   );
   const mapCase = opts.mapCase ?? fetchAndMapCase;
 
   // Reserve the expected spend BEFORE the fetch and persist it, so a crash
-  // during pagination can't lose the calls already made to CL. Charged under the
-  // lock against a freshly-read ledger so a concurrent CLI/bot quota write isn't
-  // clobbered; reconciled to the real requestCount below.
+  // during pagination can't lose the calls already made to CL. Charged against
+  // the SELECTED token under the lock on a freshly-read ledger so a concurrent
+  // CLI/bot quota write isn't clobbered; reconciled to the real count below.
   ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
-    chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day),
+    chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day, token),
   );
 
   let mapped: Awaited<ReturnType<typeof fetchAndMapCase>>;
   try {
     mapped = await mapCase(
-      { docketId, token: cfg.token, hashFirstNEntries: cfg.hashN },
+      { docketId, token, hashFirstNEntries: cfg.hashN },
       client,
     );
   } catch (e) {
     // Reconcile the reservation to the calls actually spent, then classify.
-    ledger = await reconcileQuota(cfg.ledgerPath, client.requestCount, day);
+    ledger = await reconcileQuota(
+      cfg.ledgerPath,
+      client.requestCount,
+      day,
+      token,
+    );
     const msg = e instanceof Error ? e.message : String(e);
     if (/CourtListener 404/.test(msg)) return { status: "not-found" };
     return { status: "error", message: msg };
   }
-  ledger = await reconcileQuota(cfg.ledgerPath, client.requestCount, day);
-
-  const taken = new Set(Object.values(ledger.cases).map((c) => c.handle));
-  const handle = deriveHandle(
-    mapped.docketRecord.caseName,
-    mapped.docketRecord.docketNumber,
-    cfg.domain,
-    taken,
+  ledger = await reconcileQuota(
+    cfg.ledgerPath,
+    client.requestCount,
+    day,
+    token,
   );
+
+  // A resume reuses the stored handle; minting fresh derives a new one that
+  // avoids every spoken-for handle (live + superseded).
+  const handle =
+    mode.kind === "resume"
+      ? (existing as CaseEntry).handle
+      : deriveHandle(
+          mapped.docketRecord.caseName,
+          mapped.docketRecord.docketNumber,
+          cfg.domain,
+          takenHandles(ledger),
+        );
   const rcapeRecords = mapped.records.map((r) => ({
     collection: r.collection,
     rkey: r.rkey,
@@ -189,52 +291,73 @@ export async function runProvision(
     };
   }
 
-  if (existing) {
-    console.warn(
-      `WARNING: docket ${docketId} is already provisioned at @${existing.handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
+  // Establish the account + an authenticated repo per mode. createdAt is the
+  // ledger entry's original timestamp on a resume, fresh otherwise.
+  let account: NewAccount;
+  let repo: CaseRepo;
+  let createdAt: string;
+  if (mode.kind === "resume") {
+    const zombie = existing as CaseEntry;
+    account = {
+      did: zombie.did,
+      handle: zombie.handle,
+      password: zombie.password,
+    };
+    createdAt = zombie.createdAt;
+    repo = await loginRepo({
+      host: cfg.host,
+      identifier: account.did,
+      password: account.password,
+    });
+    // The repo may hold a partial write from the crashed run — clear it so the
+    // record re-apply and backfill below are idempotent.
+    await resetRepo(repo, rcapeRecords);
+  } else {
+    if (mode.kind === "force-mint") {
+      console.warn(
+        `WARNING: docket ${docketId} is already provisioned at @${(existing as CaseEntry).handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
+      );
+    }
+    const password = generatePassword();
+    createdAt = new Date().toISOString();
+    console.log(`  creating account @${handle}…`);
+    account = await makeAccount({
+      host: cfg.host,
+      adminPassword: cfg.adminPassword,
+      handle,
+      email: `case-${docketId}@${cfg.domain}`,
+      password,
+    });
+    // Persist credentials immediately — before DNS/records/backfill — so a crash
+    // orphans neither the account nor its (only-stored) password, and a re-run
+    // resumes this entry instead of minting a duplicate. No `completed` flag yet:
+    // that's the signal the work below still has to finish.
+    ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+      recordCase(fresh, docketId, {
+        did: account.did,
+        handle: account.handle,
+        password,
+        createdAt,
+      }),
     );
+    repo = await loginRepo({
+      host: cfg.host,
+      identifier: account.did,
+      password,
+    });
   }
 
-  const password = generatePassword();
-  const createdAt = new Date().toISOString();
-  console.log(`  creating account @${handle}…`);
-  const account = await createCaseAccount({
-    host: cfg.host,
-    adminPassword: cfg.adminPassword,
-    handle,
-    email: `case-${docketId}@${cfg.domain}`,
-    password,
-  });
-
-  // Persist credentials immediately — before DNS/records/backfill — so a crash
-  // can't orphan the account or lose its (only-stored) password, and a re-run
-  // hits the dedupe guard instead of minting a duplicate.
-  const entry = {
-    did: account.did,
-    handle: account.handle,
-    password,
-    createdAt,
-  };
-  // recordCase under the lock against a fresh read: a concurrent quota charge
-  // (this provision's own reconcile, or another writer) must not be clobbered.
-  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
-    recordCase(fresh, docketId, entry),
-  );
-
-  await upsertAtprotoTxt(handle, account.did, {
+  // DNS is idempotent (upsert), so it runs for both fresh and resume — a zombie
+  // may have crashed before its TXT was written.
+  await upsertDns(account.handle, account.did, {
     zoneId: cfg.zoneId,
     token: cfg.cfToken,
   });
 
-  const repo = await CaseRepo.login({
-    host: cfg.host,
-    identifier: account.did,
-    password,
-  });
-  // Entries must be written before fireBackfill — it reads them back via
+  // Entries must be written before the backfill — it reads them back via
   // listAll(ENTRY) and silently posts nothing if they're absent.
   await repo.applyCreates(rcapeRecords);
-  const result = await fireBackfill(repo);
+  const result = await backfill(repo);
 
   // highWater must cap at the max recapSequenceNumber actually POSTED, not the
   // snapshot max: result.failed holds the entry rkeys whose backdated doc-post
@@ -248,9 +371,15 @@ export async function runProvision(
       recapSequenceNumber: (r.value as { recapSequenceNumber?: string })
         .recapSequenceNumber,
     }));
+  // Terminal write: this is the ONLY place `completed` is set — it marks the
+  // case fully provisioned so a future re-run dedupes instead of resuming.
   ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
     recordCase(fresh, docketId, {
-      ...entry,
+      did: account.did,
+      handle: account.handle,
+      password: account.password,
+      createdAt,
+      completed: true,
       highWater: postedHighWater(entrySeqs, result.failed),
       backfillFailed: result.failed.length > 0 ? result.failed : undefined,
     }),
@@ -288,7 +417,7 @@ async function main(): Promise<void> {
   }
 
   const cfg: ProvisionConfig = {
-    token: requireEnv("COURTLISTENER_API_TOKEN"),
+    tokens: parseClTokens(),
     host: process.env.PDS_HOSTNAME,
     domain: process.env.RCAPE_HANDLE_DOMAIN ?? "rcape.org",
     hashN: Number(process.env.RCAPE_HASH_FIRST_N ?? "15"),

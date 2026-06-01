@@ -13,6 +13,9 @@ import {
   quotaRemaining,
   recordCase,
   saveLedger,
+  selectToken,
+  takenHandles,
+  tokenId,
 } from "./ledger.js";
 
 const DAY = "2026-05-30";
@@ -79,6 +82,52 @@ describe("findCase / recordCase", () => {
     expect(found?.superseded).toBeUndefined();
   });
 
+  it("fills the DID on a credentials-first pending entry without archiving it", () => {
+    // Crash-window hardening: a pending entry is persisted (handle+password, no
+    // DID) before the account is minted, then the DID is filled in afterward.
+    // That fill is a same-case completion, NOT a --force re-provision — it must
+    // merge, not archive the pending entry into superseded.
+    let l = recordCase(emptyLedger(), 1, {
+      handle: "doe.rcape.org",
+      password: "pw",
+      createdAt: DAY,
+    } as unknown as CaseEntry);
+    l = recordCase(l, 1, {
+      did: "did:plc:minted",
+      handle: "doe.rcape.org",
+      password: "pw",
+      createdAt: DAY,
+    });
+    const found = findCase(l, 1);
+    expect(found?.did).toBe("did:plc:minted");
+    expect(found?.superseded).toBeUndefined();
+  });
+
+  it("marks completed only on the terminal write and keeps it across later merges", () => {
+    // Early-persist (no completed) then terminal write (completed) then a future
+    // partial update: completed must stick once set.
+    let l = recordCase(emptyLedger(), 1, {
+      did: "did:plc:x",
+      handle: "h.rcape.org",
+      password: "pw",
+      createdAt: DAY,
+    });
+    expect(findCase(l, 1)?.completed).toBeUndefined();
+    l = recordCase(l, 1, {
+      did: "did:plc:x",
+      handle: "h.rcape.org",
+      password: "pw",
+      createdAt: DAY,
+      completed: true,
+      highWater: "010",
+    });
+    expect(findCase(l, 1)?.completed).toBe(true);
+    // A later partial update that omits `completed` must not clear it.
+    l = recordCase(l, 1, { highWater: "020" } as unknown as CaseEntry);
+    expect(findCase(l, 1)?.completed).toBe(true);
+    expect(findCase(l, 1)?.highWater).toBe("020");
+  });
+
   it("merges a partial same-DID update so omitted fields are not clobbered", () => {
     let l = recordCase(emptyLedger(), 1, {
       did: "did:plc:x",
@@ -97,44 +146,114 @@ describe("findCase / recordCase", () => {
   });
 });
 
-describe("quota (5/min self-throttle aside, 125/day cap)", () => {
+describe("takenHandles", () => {
+  it("is empty for a fresh ledger", () => {
+    expect(takenHandles(emptyLedger()).size).toBe(0);
+  });
+
+  it("includes live case handles and superseded (force-displaced) handles", () => {
+    let l = recordCase(emptyLedger(), 1, {
+      did: "did:plc:first",
+      handle: "smith.rcape.org",
+      password: "pw1",
+      createdAt: DAY,
+    });
+    // --force re-provision: smith.rcape.org is displaced into superseded but is
+    // still a live account on the PDS, so it stays spoken-for.
+    l = recordCase(l, 1, {
+      did: "did:plc:second",
+      handle: "smith-2.rcape.org",
+      password: "pw2",
+      createdAt: DAY,
+    });
+    const taken = takenHandles(l);
+    expect(taken.has("smith-2.rcape.org")).toBe(true);
+    expect(taken.has("smith.rcape.org")).toBe(true);
+  });
+});
+
+describe("quota (5/min self-throttle aside, 125/day cap per token)", () => {
+  const TOK = "token-a";
+
   it("reports the full daily budget for a fresh day", () => {
-    expect(quotaRemaining(emptyLedger(), DAY)).toBe(125);
+    expect(quotaRemaining(emptyLedger(), DAY, TOK)).toBe(125);
   });
 
   it("decrements as calls are charged within the same day", () => {
     let l: Ledger = emptyLedger();
-    l = chargeQuota(l, 5, DAY);
-    expect(quotaRemaining(l, DAY)).toBe(120);
-    l = chargeQuota(l, 20, DAY);
-    expect(quotaRemaining(l, DAY)).toBe(100);
+    l = chargeQuota(l, 5, DAY, TOK);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(120);
+    l = chargeQuota(l, 20, DAY, TOK);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(100);
   });
 
   it("rolls over to a full budget on a new day", () => {
     let l: Ledger = emptyLedger();
-    l = chargeQuota(l, 100, DAY);
-    expect(quotaRemaining(l, DAY)).toBe(25);
-    expect(quotaRemaining(l, "2026-05-31")).toBe(125);
-    l = chargeQuota(l, 3, "2026-05-31");
-    expect(quotaRemaining(l, "2026-05-31")).toBe(122);
+    l = chargeQuota(l, 100, DAY, TOK);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(25);
+    expect(quotaRemaining(l, "2026-05-31", TOK)).toBe(125);
+    l = chargeQuota(l, 3, "2026-05-31", TOK);
+    expect(quotaRemaining(l, "2026-05-31", TOK)).toBe(122);
   });
 
   it("clamps remaining at zero, never negative", () => {
     let l: Ledger = emptyLedger();
-    l = chargeQuota(l, 200, DAY);
-    expect(quotaRemaining(l, DAY)).toBe(0);
+    l = chargeQuota(l, 200, DAY, TOK);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(0);
   });
 
   it("accumulates multiple charges on the same new day after a rollover", () => {
     let l: Ledger = emptyLedger();
-    l = chargeQuota(l, 50, DAY);
-    expect(quotaRemaining(l, DAY)).toBe(75);
+    l = chargeQuota(l, 50, DAY, TOK);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(75);
     // New day: the prior day's count is dropped, then same-day charges add up.
-    l = chargeQuota(l, 10, "2026-05-31");
-    l = chargeQuota(l, 7, "2026-05-31");
-    expect(quotaRemaining(l, "2026-05-31")).toBe(DAILY_CAP - 17);
+    l = chargeQuota(l, 10, "2026-05-31", TOK);
+    l = chargeQuota(l, 7, "2026-05-31", TOK);
+    expect(quotaRemaining(l, "2026-05-31", TOK)).toBe(DAILY_CAP - 17);
     // The prior day no longer governs the counter.
-    expect(quotaRemaining(l, DAY)).toBe(DAILY_CAP);
+    expect(quotaRemaining(l, DAY, TOK)).toBe(DAILY_CAP);
+  });
+});
+
+describe("token pool (per-token quota + selection)", () => {
+  it("tracks each token's budget independently", () => {
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 100, DAY, "token-a");
+    // token-a is nearly spent; token-b is untouched.
+    expect(quotaRemaining(l, DAY, "token-a")).toBe(25);
+    expect(quotaRemaining(l, DAY, "token-b")).toBe(125);
+  });
+
+  it("resets every token's counter on a new day", () => {
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 120, DAY, "token-a");
+    l = chargeQuota(l, 120, DAY, "token-b");
+    expect(quotaRemaining(l, "2026-05-31", "token-a")).toBe(125);
+    expect(quotaRemaining(l, "2026-05-31", "token-b")).toBe(125);
+  });
+
+  it("keys counters by a non-secret fingerprint, never the raw token", () => {
+    const id = tokenId("super-secret-token");
+    expect(id).not.toContain("super-secret");
+    expect(id).toMatch(/^[0-9a-f]{12}$/);
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 10, DAY, "super-secret-token");
+    // The raw token does not appear as a key.
+    expect(Object.keys(l.quota.counts)).toEqual([id]);
+  });
+
+  it("selectToken picks the first token with enough headroom for a case", () => {
+    let l: Ledger = emptyLedger();
+    // token-a has only 10 left (< 17 needed); token-b is fresh.
+    l = chargeQuota(l, 115, DAY, "token-a");
+    expect(selectToken(l, ["token-a", "token-b"], DAY, 17)).toBe("token-b");
+  });
+
+  it("selectToken returns undefined when every token is exhausted", () => {
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 120, DAY, "token-a");
+    l = chargeQuota(l, 120, DAY, "token-b");
+    expect(selectToken(l, ["token-a", "token-b"], DAY, 17)).toBeUndefined();
   });
 });
 

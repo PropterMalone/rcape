@@ -14,7 +14,7 @@ const all: ReplyKind[] = [
     failed: 0,
   },
   { kind: "exists", handle: "abrego-garcia.rcape.org" },
-  { kind: "over-cap", inFlight: 3 },
+  { kind: "over-cap", inFlight: 3, docketId: 69777799 },
   { kind: "declined" },
   { kind: "no-docket" },
   { kind: "not-found" },
@@ -80,6 +80,18 @@ describe("buildReply", () => {
 
   it("declines by pointing at @proptermalone", () => {
     expect(buildReply({ kind: "declined" })).toContain("@proptermalone");
+  });
+
+  it("gives the declined requester an actionable path (follow + re-mention)", () => {
+    const text = buildReply({ kind: "declined" });
+    expect(text).toContain("Follow");
+    expect(text.toLowerCase()).toContain("mention me again");
+  });
+
+  it("names the turned-away docket in the over-cap reply", () => {
+    expect(
+      buildReply({ kind: "over-cap", inFlight: 3, docketId: 69777799 }),
+    ).toContain("69777799");
   });
 
   it("asks for a CourtListener docket when none was given", () => {

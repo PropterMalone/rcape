@@ -25,7 +25,9 @@ export type ReplyKind =
   | { kind: "provisioned"; caseName: string; handle: string; failed: number }
   | { kind: "exists"; handle: string }
   // The requester is at their in-flight cap; their new docket wasn't queued.
-  | { kind: "over-cap"; inFlight: number }
+  // docketId names the turned-away case so the reply isn't ambiguous when they
+  // have several in flight.
+  | { kind: "over-cap"; inFlight: number; docketId: number }
   | { kind: "declined" }
   | { kind: "no-docket" }
   | { kind: "not-found" }
@@ -59,10 +61,12 @@ export function buildReply(r: ReplyKind): string {
       text = `Ook. Already in the stacks — that case is at @${r.handle}.`;
       break;
     case "over-cap":
-      text = `Ook. You already have ${r.inFlight} requests in my queue — I'll work through those first, then you can ask again. One ape, many stacks.`;
+      text = `Ook. Docket ${r.docketId} will have to wait — you already have ${r.inFlight} requests in my queue. I'll work through those first; mention me again once they clear. One ape, many stacks.`;
       break;
     case "declined":
-      text = `Ook. For now the Librarian admits requests only from those @${OWNER_DISPLAY_HANDLE} follows, or who follow @${OWNER_DISPLAY_HANDLE}. Ask there for a card.`;
+      // Give a concrete path to access, not a dead end: the allowlist is
+      // @proptermalone's follows ∪ followers, so "follow and re-mention" works.
+      text = `Ook. For now the Librarian admits only those @${OWNER_DISPLAY_HANDLE} follows, or who follow back. Follow @${OWNER_DISPLAY_HANDLE} and mention me again, and I'll fetch your case.`;
       break;
     case "no-docket":
       // Acknowledge the mention (the requester knows I heard them), then ask for

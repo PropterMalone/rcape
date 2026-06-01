@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AllowlistCache, type GraphClient } from "./allowlist.js";
 import { type BotDeps, classify } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
-import { emptyLedger, saveLedger } from "./ledger.js";
+import { emptyLedger, recordCase, saveLedger } from "./ledger.js";
 import type { ProvisionConfig, ProvisionResult } from "./provisionCase.js";
 import {
   type Job,
@@ -151,7 +151,7 @@ describe("drain error logging (no credential leak)", () => {
       await saveLedger(ledgerPath, emptyLedger());
       const { agent } = mockAgent([aliceMention()]);
       const cfg = {
-        token: "t",
+        tokens: ["t"],
         domain: "rcape.org",
         hashN: 0,
         adminPassword: "",
@@ -185,6 +185,61 @@ describe("drain error logging (no credential leak)", () => {
   });
 });
 
+describe("crash-zombie is resumed, not reported as already provisioned", () => {
+  it("enqueues + drains a present-but-incomplete ledger entry instead of replying exists", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      // A zombie: credentials persisted early, no `completed` flag — the handle
+      // doesn't resolve yet, so the bot must NOT tell the requester it's done.
+      await saveLedger(
+        ledgerPath,
+        recordCase(emptyLedger(), 69777799, {
+          did: "did:plc:zombie",
+          handle: "zombie.rcape.org",
+          password: "pw",
+          createdAt: "2026-05-30",
+        }),
+      );
+      const { agent, replies } = mockAgent([aliceMention()]);
+      let provisionCalls = 0;
+      const cfg = {
+        tokens: ["t"],
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath,
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg,
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          provisionCalls++;
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      // The zombie was RESUMED through the provision path (old code returned
+      // `exists` and never enqueued, so provision was never called).
+      expect(provisionCalls).toBe(1);
+      // No reply pointed the requester at the unresolved zombie handle.
+      expect(replies.some((r) => r.text.includes("zombie.rcape.org"))).toBe(
+        false,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("persist-before-reply (no duplicate provision on crash)", () => {
   it("marks the job terminal before the done-reply, so a crash mid-reply does not re-provision", async () => {
     const { pollOnce } = await import("./bot.js");
@@ -211,7 +266,7 @@ describe("persist-before-reply (no duplicate provision on crash)", () => {
         return origReply(parent, root, text);
       };
       const cfg = {
-        token: "t",
+        tokens: ["t"],
         domain: "rcape.org",
         hashN: 0,
         adminPassword: "",
@@ -278,7 +333,7 @@ describe("pollOnce", () => {
       ];
       const { agent, replies } = mockAgent(mentions);
       const cfg = {
-        token: "t",
+        tokens: ["t"],
         domain: "rcape.org",
         hashN: 0,
         adminPassword: "",
@@ -420,7 +475,7 @@ describe("drain-time allowlist re-check", () => {
 
       let provisionCalls = 0;
       const cfg = {
-        token: "t",
+        tokens: ["t"],
         domain: "rcape.org",
         hashN: 0,
         adminPassword: "",
@@ -458,7 +513,7 @@ describe("drain-time allowlist re-check", () => {
 
 function baseCfg(ledgerPath: string): ProvisionConfig {
   return {
-    token: "t",
+    tokens: ["t"],
     domain: "rcape.org",
     hashN: 0,
     adminPassword: "",

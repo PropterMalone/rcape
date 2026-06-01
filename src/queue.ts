@@ -45,14 +45,19 @@ const SEEN_CAP = 1000;
 // could carry (a handle never contains whitespace) to avoid log/copy injection.
 const HANDLE_MAX = 253;
 
+// Valid atproto handle characters: ASCII letters, digits, dot, hyphen. Anything
+// else in a (untrusted) notification handle is dropped before it lands in reply
+// copy and journald logs.
+const HANDLE_CHAR = /[a-zA-Z0-9.-]/;
+
 export function sanitizeHandle(handle: string): string {
-  // Drop whitespace + ASCII control chars (codepoint <= 0x20 or == 0x7f) a
-  // malformed notification could carry — a handle never contains them — then cap.
+  // Whitelist, don't blocklist: dropping only control chars (the prior approach)
+  // still passed high-Unicode bidi/zero-width codepoints — U+202E (RLO), U+2066-9,
+  // ZWJ — which enable visual spoofing and log-line injection. Keep only the
+  // characters a real handle can contain, then cap the length.
   let out = "";
   for (const ch of handle) {
-    const code = ch.codePointAt(0) ?? 0;
-    if (code <= 0x20 || code === 0x7f) continue;
-    out += ch;
+    if (HANDLE_CHAR.test(ch)) out += ch;
   }
   return out.slice(0, HANDLE_MAX);
 }
@@ -66,7 +71,7 @@ export function findJob(q: QueueState, docketId: number): Job | undefined {
 }
 
 // A job is "active" (not yet terminal) while it's queued or backing off a retry.
-function isActive(j: Job): boolean {
+export function isActive(j: Job): boolean {
   return j.status === "queued" || j.status === "retrying";
 }
 
