@@ -255,6 +255,51 @@ describe("token pool (per-token quota + selection)", () => {
     l = chargeQuota(l, 120, DAY, "token-b");
     expect(selectToken(l, ["token-a", "token-b"], DAY, 17)).toBeUndefined();
   });
+
+  it("drops a stale (older-day) charge instead of wiping the newer day's counters", () => {
+    // Reconcile straddling UTC midnight: a concurrent writer already rolled the
+    // day to D2 and reserved against token-b. A late reconcile for D1 must not
+    // reset D2 or revert the day.
+    const l: Ledger = {
+      cases: {},
+      quota: { day: "2026-06-02", counts: { [tokenId("token-b")]: 50 } },
+    };
+    const after = chargeQuota(l, -16, "2026-06-01", "token-a");
+    expect(after.quota.day).toBe("2026-06-02");
+    expect(after.quota.counts[tokenId("token-b")]).toBe(50);
+    expect(quotaRemaining(after, "2026-06-02", "token-a")).toBe(125);
+  });
+
+  it("clamps a same-day counter at zero rather than going negative", () => {
+    let l: Ledger = emptyLedger();
+    l = chargeQuota(l, 5, DAY, "token-a");
+    // An over-large refund (reconcile delta) must not drive the counter negative,
+    // which would make quotaRemaining report MORE than the daily cap.
+    l = chargeQuota(l, -20, DAY, "token-a");
+    expect(l.quota.counts[tokenId("token-a")]).toBe(0);
+    expect(quotaRemaining(l, DAY, "token-a")).toBe(125);
+  });
+
+  it("migrates a legacy {day,count} ledger into a conservative shared floor", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-ledger-"));
+    try {
+      const path = join(dir, "ledger.json");
+      // Pre-pool on-disk shape.
+      await writeFile(
+        path,
+        JSON.stringify({ cases: {}, quota: { day: DAY, count: 17 } }),
+      );
+      const l = await loadLedger(path);
+      // The legacy spend is charged against EVERY token for that day (floor),
+      // never under-counted — so the CL cap can't be exceeded after upgrade.
+      expect(quotaRemaining(l, DAY, "token-a")).toBe(125 - 17);
+      expect(quotaRemaining(l, DAY, "token-b")).toBe(125 - 17);
+      // Next day clears it.
+      expect(quotaRemaining(l, "2026-05-31", "token-a")).toBe(125);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("crash-safe persistence", () => {

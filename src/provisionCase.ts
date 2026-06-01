@@ -102,9 +102,9 @@ const POST_COLLECTION = "app.bsky.feed.post";
 
 export type ProvisionMode =
   | { kind: "fresh" }
-  | { kind: "exists" }
-  | { kind: "resume" }
-  | { kind: "force-mint" };
+  | { kind: "exists"; entry: CaseEntry }
+  | { kind: "resume"; entry: CaseEntry }
+  | { kind: "force-mint"; entry: CaseEntry };
 
 // pattern: Functional Core
 // Decide how to handle a provision request from the existing ledger entry (if
@@ -114,14 +114,17 @@ export type ProvisionMode =
 // finished, then the process died. Treating its mere presence as "already
 // provisioned" (the original bug) reports a handle that doesn't resolve as done;
 // it must be repaired in place instead. A completed entry dedupes, or mints a
-// second account under --force.
+// second account under --force. The non-fresh variants carry the entry so the
+// caller works with a narrowed value instead of re-asserting it's defined.
 export function provisionMode(
   existing: CaseEntry | undefined,
   force: boolean,
 ): ProvisionMode {
   if (!existing) return { kind: "fresh" };
-  if (!existing.completed) return { kind: "resume" };
-  return force ? { kind: "force-mint" } : { kind: "exists" };
+  if (!existing.completed) return { kind: "resume", entry: existing };
+  return force
+    ? { kind: "force-mint", entry: existing }
+    : { kind: "exists", entry: existing };
 }
 
 // pattern: Functional Core
@@ -163,11 +166,13 @@ async function reconcileQuota(
 }
 
 // Wipe a half-provisioned repo back to a clean slate before re-applying records
-// and re-firing the backfill on a RESUME. applyWrites#create errors on an
-// already-present rkey and fireBackfill refuses when any post exists, so a
-// crash mid-write leaves the account un-reprovisionable in place; deleting the
-// rcape record collections + all posts (the profile is overwritten by the
-// backfill, not deleted) makes the rebuild idempotent.
+// and re-firing the backfill on a RESUME. applyWrites#create on an already-
+// present rkey is rejected by the PDS (implementation behavior — the lexicon
+// documents only InvalidSwap), and fireBackfill refuses when any post exists, so
+// a crash mid-write would otherwise leave the account un-reprovisionable in
+// place. Deleting the rcape record collections + all posts first (the profile is
+// overwritten by the backfill, not deleted) sidesteps both and makes the rebuild
+// idempotent. (putRecord is create-or-update, but applyWrites batches.)
 async function resetRepo(
   repo: CaseRepo,
   rows: { collection: string }[],
@@ -213,9 +218,7 @@ export async function runProvision(
   const mode = provisionMode(existing, opts.force ?? false);
 
   if (mode.kind === "exists") {
-    // existing is defined and completed in this branch.
-    const done = existing as CaseEntry;
-    return { status: "exists", handle: done.handle, did: done.did };
+    return { status: "exists", handle: mode.entry.handle, did: mode.entry.did };
   }
 
   const day = new Date().toISOString().slice(0, 10);
@@ -268,7 +271,7 @@ export async function runProvision(
   // avoids every spoken-for handle (live + superseded).
   const handle =
     mode.kind === "resume"
-      ? (existing as CaseEntry).handle
+      ? mode.entry.handle
       : deriveHandle(
           mapped.docketRecord.caseName,
           mapped.docketRecord.docketNumber,
@@ -297,7 +300,18 @@ export async function runProvision(
   let repo: CaseRepo;
   let createdAt: string;
   if (mode.kind === "resume") {
-    const zombie = existing as CaseEntry;
+    const zombie = mode.entry;
+    // A wide-window zombie always carries a did (early-persist wrote it before
+    // the crash window). The deferred micro-window — a crash during mint, before
+    // early-persist — produces NO ledger entry, so it never reaches resume. Guard
+    // anyway rather than attempt a PDS login with an empty identifier if a future
+    // change ever persists a did-less entry.
+    if (!zombie.did) {
+      return {
+        status: "error",
+        message: `cannot resume docket ${docketId}: ledger entry has no DID (manual recovery required)`,
+      };
+    }
     account = {
       did: zombie.did,
       handle: zombie.handle,
@@ -315,7 +329,7 @@ export async function runProvision(
   } else {
     if (mode.kind === "force-mint") {
       console.warn(
-        `WARNING: docket ${docketId} is already provisioned at @${(existing as CaseEntry).handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
+        `WARNING: docket ${docketId} is already provisioned at @${mode.entry.handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
       );
     }
     const password = generatePassword();

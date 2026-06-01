@@ -198,6 +198,14 @@ describe("sanitizeHandle", () => {
   it("trims surrounding whitespace", () => {
     expect(sanitizeHandle("  bob.test  ")).toBe("bob.test");
   });
+
+  it("drops high-Unicode bidi / zero-width spoofing codepoints", () => {
+    // U+202E RLO, U+2066 LRI, U+200D ZWJ - visual-spoof + log-injection vectors
+    // the old control-char blocklist let through. Built via fromCodePoint so the
+    // source stays plain ASCII (no embedded bidi controls / Trojan Source).
+    const spoofed = `ev${String.fromCodePoint(0x202e)}l${String.fromCodePoint(0x2066)}i${String.fromCodePoint(0x200d)}l.bsky.social`;
+    expect(sanitizeHandle(spoofed)).toBe("evlil.bsky.social");
+  });
 });
 
 describe("seen set", () => {
@@ -217,29 +225,5 @@ describe("seen set", () => {
     // the most recent survive
     expect(hasSeen(q, "at://n1199")).toBe(true);
     expect(hasSeen(q, "at://n0")).toBe(false);
-  });
-});
-
-describe("sanitizeHandle", () => {
-  it("keeps a normal handle untouched", () => {
-    expect(sanitizeHandle("alice.bsky.social")).toBe("alice.bsky.social");
-    expect(sanitizeHandle("a-b.rcape.org")).toBe("a-b.rcape.org");
-  });
-
-  it("drops control/whitespace chars a malformed notification could carry", () => {
-    expect(sanitizeHandle("ali\tce .bsky\n")).toBe("alice.bsky");
-  });
-
-  it("drops high-Unicode bidi / zero-width spoofing codepoints", () => {
-    // U+202E RLO, U+2066 LRI, U+200D ZWJ - visual-spoof + log-injection vectors
-    // the old control-char blocklist let through. Built via fromCodePoint so the
-    // source stays plain ASCII (no embedded bidi controls / Trojan Source).
-    const spoofed = `ev${String.fromCodePoint(0x202e)}l${String.fromCodePoint(0x2066)}i${String.fromCodePoint(0x200d)}l.bsky.social`;
-    expect(sanitizeHandle(spoofed)).toBe("evlil.bsky.social");
-  });
-
-  it("caps at the atproto max handle length", () => {
-    const long = `${"a".repeat(300)}.test`;
-    expect(sanitizeHandle(long).length).toBe(253);
   });
 });

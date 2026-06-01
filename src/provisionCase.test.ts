@@ -191,6 +191,7 @@ describe("runProvision dedupe / resume", () => {
 
     const repo = mockRepo();
     const makeAccount = vi.fn();
+    let loginArgs: { identifier?: string; password?: string } | undefined;
     const result = await runProvision(123, cfg(ledgerPath), {
       makeClient: () => clientWithCount(17),
       mapCase: async () =>
@@ -208,7 +209,10 @@ describe("runProvision dedupe / resume", () => {
         }) as unknown as MappedCase,
       makeAccount: makeAccount as never,
       upsertDns: (async () => ({ created: false })) as never,
-      loginRepo: async () => repo,
+      loginRepo: (async (o: { identifier: string; password: string }) => {
+        loginArgs = o;
+        return repo;
+      }) as never,
       backfill: async () => ({ published: 1, failed: [] }),
     });
 
@@ -218,6 +222,13 @@ describe("runProvision dedupe / resume", () => {
       expect(result.handle).toBe("zombie.rcape.org");
     }
     expect(makeAccount).not.toHaveBeenCalled();
+    // Logged in with the ZOMBIE's stored credentials (not a fresh mint) — a
+    // resume that used the wrong identity would fail loudly in prod but this
+    // pins the intent.
+    expect(loginArgs).toMatchObject({
+      identifier: "did:plc:zombie",
+      password: "pw-z",
+    });
     // Reset the half-written repo (deleted leftovers) then rebuilt it.
     expect(repo.applyDeletes).toHaveBeenCalled();
     expect(repo.applyCreates).toHaveBeenCalled();

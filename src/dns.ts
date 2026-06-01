@@ -56,11 +56,11 @@ export async function upsertAtprotoTxt(
   const existing = await cf<{ id: string }[]>(
     fetchImpl,
     "GET",
-    // name.exact (dot notation — the documented Cloudflare filter). The bracket
-    // form `name[exact]` is NOT a recognized parameter: Cloudflare silently
-    // ignores it and returns ALL TXT records in the zone, so existing[0] could
-    // be an unrelated record we'd then overwrite. `name.exact` matches only the
-    // single record for exactly _atproto.<handle>.
+    // name.exact (dot notation) is the documented Cloudflare exact-match filter.
+    // The previously-used bracket form `name[exact]` is not the documented
+    // parameter; its behavior is implementation-defined and not guaranteed to
+    // filter at all, so a non-exact match could return an unrelated TXT record
+    // that we'd then overwrite. name.exact matches only _atproto.<handle>.
     `/zones/${opts.zoneId}/dns_records?type=TXT&name.exact=${encodeURIComponent(name)}`,
     opts.token,
   );

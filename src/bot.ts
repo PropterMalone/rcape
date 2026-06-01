@@ -40,9 +40,11 @@ import {
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
 
 // A full case fetch is ~17 CL calls (docket + entry/party pages). Require 20 —
-// a small headroom over the worst case — before STARTING one, so a case can't
-// begin, exhaust the shared 125/day budget partway, and strand itself
-// half-provisioned. Drain re-checks this before each job.
+// headroom over RESERVED_CALLS_PER_CASE (provisionCase.ts = 17) — before STARTING
+// one, so a case can't begin, exhaust a token's shared budget partway, and strand
+// itself half-provisioned. MUST stay > RESERVED_CALLS_PER_CASE so the gap absorbs
+// the race between this check and runProvision's reservation charge. Drain
+// re-checks before each job.
 const MIN_QUOTA_FOR_CASE = 20;
 // Max in-flight (queued/retrying) requests per requester. Bounds how much of the
 // shared daily budget any single allowlisted account can reserve at once (3 ×

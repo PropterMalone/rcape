@@ -109,31 +109,54 @@ export function takenHandles(ledger: Ledger): Set<string> {
   return taken;
 }
 
+// A pre-pool ledger stored one aggregate counter ({day, count}); the pool stores
+// per-token counters keyed by tokenId. A legacy count can't be attributed to a
+// token fingerprint, so on migration it's preserved under this reserved key and
+// applied as a shared FLOOR to every token's usage for that day — it over-counts
+// across tokens but never under-counts, so the CL cap is never exceeded. It's
+// dropped on the next day-rollover (chargeQuota rebuilds counts).
+const LEGACY_QUOTA_KEY = "_legacyAggregate";
+
 // Requests left today for ONE token. A different day means that token's counter
-// has reset (counters are scoped to quota.day).
+// has reset (counters are scoped to quota.day). The legacy-aggregate floor (if a
+// pre-pool ledger was migrated this day) is added to every token's usage.
 export function quotaRemaining(
   ledger: Ledger,
   day: string,
   token: string,
 ): number {
-  const used =
-    ledger.quota.day === day ? (ledger.quota.counts[tokenId(token)] ?? 0) : 0;
+  if (ledger.quota.day !== day) return DAILY_CAP;
+  const { counts } = ledger.quota;
+  const used = (counts[tokenId(token)] ?? 0) + (counts[LEGACY_QUOTA_KEY] ?? 0);
   return Math.max(0, DAILY_CAP - used);
 }
 
-// Charge `n` requests against ONE token for `day`. A new day resets every
-// token's counter (counts is rebuilt empty) before applying this charge.
+// Charge `n` requests against ONE token for `day`. The day comparison is
+// DIRECTIONAL so a stale charge can't corrupt the durable counters: a reconcile
+// whose ~3-min case fetch straddled UTC midnight while a concurrent writer
+// already rolled the day forward would otherwise reset the newer day's counts
+// (wiping other tokens' reservations) and could drive a counter negative
+// (masking exhaustion). Same-day charges clamp at zero (the reconcile delta is
+// negative); a forward rollover resets all counters; a stale (older-day) charge
+// is dropped — under-count is the safe direction.
 export function chargeQuota(
   ledger: Ledger,
   n: number,
   day: string,
   token: string,
 ): Ledger {
-  const sameDay = ledger.quota.day === day;
-  const counts = sameDay ? { ...ledger.quota.counts } : {};
   const id = tokenId(token);
-  counts[id] = (counts[id] ?? 0) + n;
-  return { ...ledger, quota: { day, counts } };
+  if (day === ledger.quota.day) {
+    const counts = { ...ledger.quota.counts };
+    counts[id] = Math.max(0, (counts[id] ?? 0) + n);
+    return { ...ledger, quota: { day, counts } };
+  }
+  if (day > ledger.quota.day) {
+    // Forward rollover (incl. the first charge on a fresh "" day): reset.
+    return { ...ledger, quota: { day, counts: { [id]: Math.max(0, n) } } };
+  }
+  // Stale charge for an older day than the store currently holds — drop it.
+  return ledger;
 }
 
 // Pick the first configured token with at least `need` requests left today, or
@@ -151,9 +174,16 @@ export function selectToken(
 
 function normalizeQuota(q: {
   day?: string;
+  count?: number; // legacy single-counter shape (pre-token-pool)
   counts?: Record<string, number>;
 }): Ledger["quota"] {
-  return { day: q?.day ?? "", counts: q?.counts ?? {} };
+  const counts = { ...(q?.counts ?? {}) };
+  // Migrate a legacy aggregate into the shared-floor key so a same-day upgrade
+  // doesn't silently zero today's spend (see LEGACY_QUOTA_KEY).
+  if (q?.count && q.count > 0 && counts[LEGACY_QUOTA_KEY] === undefined) {
+    counts[LEGACY_QUOTA_KEY] = q.count;
+  }
+  return { day: q?.day ?? "", counts };
 }
 
 function normalize(parsed: Partial<Ledger>): Ledger {
