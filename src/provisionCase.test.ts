@@ -277,6 +277,38 @@ describe("runProvision dedupe / resume", () => {
     expect(entry?.completed).toBe(true);
     expect(entry?.superseded?.[0]?.did).toBe("did:plc:first");
   });
+
+  it("returns an error instead of throwing when a post-fetch step throws", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(ledgerPath, emptyLedger());
+    const repo = mockRepo({ did: "did:plc:x" });
+    const result = await runProvision(123, cfg(ledgerPath), {
+      makeClient: () => clientWithCount(17),
+      mapCase: async () =>
+        ({
+          docketRecord: {
+            caseName: "Smith v. Jones",
+            docketNumber: "1:23-cv-9",
+          },
+          entryRecords: [],
+          parties: [],
+          records: [],
+        }) as unknown as MappedCase,
+      makeAccount: (async (o: { handle: string; password: string }) => ({
+        did: "did:plc:x",
+        handle: o.handle,
+        password: o.password,
+      })) as never,
+      // A PDS/DNS hiccup throws after the CL fetch — it must surface as an error
+      // result, not a thrown exception that escapes drain's retry cap and loops.
+      upsertDns: (async () => {
+        throw new Error("Handle too long");
+      }) as never,
+      loginRepo: async () => repo,
+      backfill: async () => ({ published: 0, failed: [] }),
+    });
+    expect(result.status).toBe("error");
+  });
 });
 
 describe("postedHighWater", () => {

@@ -294,119 +294,131 @@ export async function runProvision(
     };
   }
 
-  // Establish the account + an authenticated repo per mode. createdAt is the
-  // ledger entry's original timestamp on a resume, fresh otherwise.
-  let account: NewAccount;
-  let repo: CaseRepo;
-  let createdAt: string;
-  if (mode.kind === "resume") {
-    const zombie = mode.entry;
-    // A wide-window zombie always carries a did (early-persist wrote it before
-    // the crash window). The deferred micro-window — a crash during mint, before
-    // early-persist — produces NO ledger entry, so it never reaches resume. Guard
-    // anyway rather than attempt a PDS login with an empty identifier if a future
-    // change ever persists a did-less entry.
-    if (!zombie.did) {
-      return {
-        status: "error",
-        message: `cannot resume docket ${docketId}: ledger entry has no DID (manual recovery required)`,
+  // Everything past the CL fetch hits the PDS/Cloudflare — external systems the
+  // drain's retry+backoff exists to absorb. Without this guard a throw here ("Handle
+  // too long", a PDS 5xx, a DNS hiccup) escapes drain entirely, leaving the job
+  // queued so it re-provisions every poll — bypassing MAX_PROVISION_RETRIES and
+  // re-spending CL quota. Return an error so it flows through the retry cap instead.
+  try {
+    // Establish the account + an authenticated repo per mode. createdAt is the
+    // ledger entry's original timestamp on a resume, fresh otherwise.
+    let account: NewAccount;
+    let repo: CaseRepo;
+    let createdAt: string;
+    if (mode.kind === "resume") {
+      const zombie = mode.entry;
+      // A wide-window zombie always carries a did (early-persist wrote it before
+      // the crash window). The deferred micro-window — a crash during mint, before
+      // early-persist — produces NO ledger entry, so it never reaches resume. Guard
+      // anyway rather than attempt a PDS login with an empty identifier if a future
+      // change ever persists a did-less entry.
+      if (!zombie.did) {
+        return {
+          status: "error",
+          message: `cannot resume docket ${docketId}: ledger entry has no DID (manual recovery required)`,
+        };
+      }
+      account = {
+        did: zombie.did,
+        handle: zombie.handle,
+        password: zombie.password,
       };
-    }
-    account = {
-      did: zombie.did,
-      handle: zombie.handle,
-      password: zombie.password,
-    };
-    createdAt = zombie.createdAt;
-    repo = await loginRepo({
-      host: cfg.host,
-      identifier: account.did,
-      password: account.password,
-    });
-    // The repo may hold a partial write from the crashed run — clear it so the
-    // record re-apply and backfill below are idempotent.
-    await resetRepo(repo, rcapeRecords);
-  } else {
-    if (mode.kind === "force-mint") {
-      console.warn(
-        `WARNING: docket ${docketId} is already provisioned at @${mode.entry.handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
+      createdAt = zombie.createdAt;
+      repo = await loginRepo({
+        host: cfg.host,
+        identifier: account.did,
+        password: account.password,
+      });
+      // The repo may hold a partial write from the crashed run — clear it so the
+      // record re-apply and backfill below are idempotent.
+      await resetRepo(repo, rcapeRecords);
+    } else {
+      if (mode.kind === "force-mint") {
+        console.warn(
+          `WARNING: docket ${docketId} is already provisioned at @${mode.entry.handle}; --force mints a SECOND account (the prior one is archived in the ledger, not deleted from the PDS).`,
+        );
+      }
+      const password = generatePassword();
+      createdAt = new Date().toISOString();
+      console.log(`  creating account @${handle}…`);
+      account = await makeAccount({
+        host: cfg.host,
+        adminPassword: cfg.adminPassword,
+        handle,
+        email: `case-${docketId}@${cfg.domain}`,
+        password,
+      });
+      // Persist credentials immediately — before DNS/records/backfill — so a crash
+      // orphans neither the account nor its (only-stored) password, and a re-run
+      // resumes this entry instead of minting a duplicate. No `completed` flag yet:
+      // that's the signal the work below still has to finish.
+      ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+        recordCase(fresh, docketId, {
+          did: account.did,
+          handle: account.handle,
+          password,
+          createdAt,
+        }),
       );
+      repo = await loginRepo({
+        host: cfg.host,
+        identifier: account.did,
+        password,
+      });
     }
-    const password = generatePassword();
-    createdAt = new Date().toISOString();
-    console.log(`  creating account @${handle}…`);
-    account = await makeAccount({
-      host: cfg.host,
-      adminPassword: cfg.adminPassword,
-      handle,
-      email: `case-${docketId}@${cfg.domain}`,
-      password,
+
+    // DNS is idempotent (upsert), so it runs for both fresh and resume — a zombie
+    // may have crashed before its TXT was written.
+    await upsertDns(account.handle, account.did, {
+      zoneId: cfg.zoneId,
+      token: cfg.cfToken,
     });
-    // Persist credentials immediately — before DNS/records/backfill — so a crash
-    // orphans neither the account nor its (only-stored) password, and a re-run
-    // resumes this entry instead of minting a duplicate. No `completed` flag yet:
-    // that's the signal the work below still has to finish.
+
+    // Entries must be written before the backfill — it reads them back via
+    // listAll(ENTRY) and silently posts nothing if they're absent.
+    await repo.applyCreates(rcapeRecords);
+    const result = await backfill(repo);
+
+    // highWater must cap at the max recapSequenceNumber actually POSTED, not the
+    // snapshot max: result.failed holds the entry rkeys whose backdated doc-post
+    // failed, and advancing highWater past them would make the future incremental
+    // monitor (which only fetches filings beyond highWater) skip them forever.
+    // Correlate failed rkeys to sequence numbers via rcapeRecords (rkey + value).
+    const entrySeqs = rcapeRecords
+      .filter((r) => r.collection === ENTRY_COLLECTION)
+      .map((r) => ({
+        rkey: r.rkey,
+        recapSequenceNumber: (r.value as { recapSequenceNumber?: string })
+          .recapSequenceNumber,
+      }));
+    // Terminal write: this is the ONLY place `completed` is set — it marks the
+    // case fully provisioned so a future re-run dedupes instead of resuming.
     ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
       recordCase(fresh, docketId, {
         did: account.did,
         handle: account.handle,
-        password,
+        password: account.password,
         createdAt,
+        completed: true,
+        highWater: postedHighWater(entrySeqs, result.failed),
+        backfillFailed: result.failed.length > 0 ? result.failed : undefined,
       }),
     );
-    repo = await loginRepo({
-      host: cfg.host,
-      identifier: account.did,
-      password,
-    });
-  }
 
-  // DNS is idempotent (upsert), so it runs for both fresh and resume — a zombie
-  // may have crashed before its TXT was written.
-  await upsertDns(account.handle, account.did, {
-    zoneId: cfg.zoneId,
-    token: cfg.cfToken,
-  });
-
-  // Entries must be written before the backfill — it reads them back via
-  // listAll(ENTRY) and silently posts nothing if they're absent.
-  await repo.applyCreates(rcapeRecords);
-  const result = await backfill(repo);
-
-  // highWater must cap at the max recapSequenceNumber actually POSTED, not the
-  // snapshot max: result.failed holds the entry rkeys whose backdated doc-post
-  // failed, and advancing highWater past them would make the future incremental
-  // monitor (which only fetches filings beyond highWater) skip them forever.
-  // Correlate failed rkeys to sequence numbers via rcapeRecords (rkey + value).
-  const entrySeqs = rcapeRecords
-    .filter((r) => r.collection === ENTRY_COLLECTION)
-    .map((r) => ({
-      rkey: r.rkey,
-      recapSequenceNumber: (r.value as { recapSequenceNumber?: string })
-        .recapSequenceNumber,
-    }));
-  // Terminal write: this is the ONLY place `completed` is set — it marks the
-  // case fully provisioned so a future re-run dedupes instead of resuming.
-  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
-    recordCase(fresh, docketId, {
-      did: account.did,
+    return {
+      status: "provisioned",
       handle: account.handle,
-      password: account.password,
-      createdAt,
-      completed: true,
-      highWater: postedHighWater(entrySeqs, result.failed),
-      backfillFailed: result.failed.length > 0 ? result.failed : undefined,
-    }),
-  );
-
-  return {
-    status: "provisioned",
-    handle: account.handle,
-    did: account.did,
-    caseName: mapped.docketRecord.caseName,
-    published: result.published,
-    failed: result.failed.length,
-  };
+      did: account.did,
+      caseName: mapped.docketRecord.caseName,
+      published: result.published,
+      failed: result.failed.length,
+    };
+  } catch (e) {
+    return {
+      status: "error",
+      message: e instanceof Error ? e.message : String(e),
+    };
+  }
 }
 
 function requireEnv(name: string): string {
