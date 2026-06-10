@@ -21,7 +21,7 @@ const INTRO = truncate(
 );
 
 const BIO = truncate(
-  "Unofficial: I mirror U.S. federal court dockets as native AT Protocol repos. Mention me with a CourtListener docket and I provision that case, filing by filing. A Pratchett-Librarian for the public record, tended by @proptermalone. Source: CourtListener.",
+  "I mirror U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket and I provision that case, filing by filing. A Librarian for the public record, tended by @proptermalone. Source: CourtListener.",
   256,
 );
 
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   }
   await repo.putRecord(PROFILE, "self", {
     $type: PROFILE,
-    displayName: "R.C. Ape — the Librarian",
+    displayName: "R.C. Ape, PhD, MLS",
     description: BIO,
     ...(avatar ? { avatar } : {}),
     labels: BOT_SELF_LABEL,
