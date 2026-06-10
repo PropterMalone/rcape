@@ -5,7 +5,9 @@
 # Logs: journalctl -u rcape-bot -f
 #
 # Adjust User/WorkingDirectory to match the checkout. The bot reads creds from
-# the project .env (loaded by the `bot` npm script via node --env-file).
+# the project .env (loaded by the `bot` npm script via node --env-file), EXCEPT
+# the PDS super-admin password, which is kept out of .env and injected from
+# pds/pds.env by the run-bot.sh wrapper (see that script for the why).
 
 [Unit]
 Description=RC Ape @-mention bot (provisions court-docket repos on request)
@@ -16,7 +18,7 @@ Wants=network-online.target
 Type=simple
 User=rcape
 WorkingDirectory=/opt/rcape
-ExecStart=/usr/bin/npm run bot
+ExecStart=/opt/rcape/deploy/run-bot.sh
 Restart=always
 RestartSec=10
 # The poll loop is resilient to transient errors; restart covers crashes/reboots.
