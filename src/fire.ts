@@ -57,7 +57,7 @@ export function buildProfileAndSeed(docket: DocketRecord): ProfileAndSeed {
     $type: PROFILE,
     displayName: truncate(docket.caseName, 64),
     description: truncate(
-      `Unofficial mirror of federal docket ${docket.docketNumber} (${courtLabel(docket.court)}), Judge ${docket.assignedJudge}. Signed, content-addressed filings; browse the docket or follow for new ones. Shelved by @ape.rcape.org. Source: CourtListener.`,
+      `Unofficial mirror of federal docket ${docket.docketNumber} (${courtLabel(docket.court)}), Judge ${docket.assignedJudge}. Browse the docket or follow for new entries. Shelved by @ape.rcape.org. Source: CourtListener.`,
       256,
     ),
     labels: BOT_SELF_LABEL,
