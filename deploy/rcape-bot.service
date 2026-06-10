@@ -4,7 +4,8 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now rcape-bot
 # Logs: journalctl -u rcape-bot -f
 #
-# Adjust User/WorkingDirectory to match the checkout. The bot reads creds from
+# Set User and the /opt/rcape paths (WorkingDirectory, ExecStart, ReadWritePaths)
+# to match your own deployment. The bot reads creds from
 # the project .env (loaded by the `bot` npm script via node --env-file), EXCEPT
 # the PDS super-admin password, which is kept out of .env and injected from
 # pds/pds.env by the run-bot.sh wrapper (see that script for the why).
