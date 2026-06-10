@@ -53,6 +53,36 @@ describe("deriveHandle", () => {
     expect(slug).toBe("the-exceptionally-verbose-plai");
   });
 
+  it("derives from the defendant when the plaintiff is the government (criminal cases)", () => {
+    // Every federal criminal case is "United States v. <defendant>", so deriving
+    // from the plaintiff collides them all onto "united-states".
+    expect(
+      deriveHandle("United States v. Rabbitt", "1:25-cr-00693", "rcape.org"),
+    ).toBe("rabbitt.rcape.org");
+    expect(deriveHandle("USA v. Smith", "1:24-cr-1", "rcape.org")).toBe(
+      "smith.rcape.org",
+    );
+    expect(
+      deriveHandle(
+        "United States of America v. Jones",
+        "1:24-cr-2",
+        "rcape.org",
+      ),
+    ).toBe("jones.rcape.org");
+  });
+
+  it("still uses the plaintiff for a civil party that merely contains 'United States'", () => {
+    // "United States Steel Corp" is a party, not the prosecuting government —
+    // the anchored match avoids that false positive.
+    expect(
+      deriveHandle(
+        "United States Steel Corp v. Acme",
+        "1:24-cv-9",
+        "rcape.org",
+      ),
+    ).toBe("united-states-steel-corp.rcape.org");
+  });
+
   it("disambiguates collisions with a numeric suffix", () => {
     const taken = new Set(["smith.rcape.org", "smith-2.rcape.org"]);
     expect(deriveHandle("Smith v. Co", "1:24-cv-3", "rcape.org", taken)).toBe(

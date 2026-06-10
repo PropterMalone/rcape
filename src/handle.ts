@@ -20,9 +20,23 @@ function cap(slug: string, max: number): string {
   return slug.slice(0, max).replace(/-+$/, "");
 }
 
-// "Abrego Garcia v. Noem" -> "Abrego Garcia"; falls back to the whole name.
-function plaintiff(caseName: string): string {
-  return caseName.split(CASE_SEPARATOR)[0] ?? caseName;
+// A government prosecutor is the plaintiff in every criminal case, so naming the
+// handle after the plaintiff collides them all onto one slug ("united-states").
+// Anchored exact-match so a civil party that merely contains these words (e.g.
+// "United States Steel Corp") is NOT treated as the government.
+const GOV_PLAINTIFF =
+  /^(the )?(united states( of america)?|u\.?\s?s\.?\s?a?\.?|people|state|commonwealth)$/i;
+
+// The party to name the handle after: the defendant when the plaintiff is a
+// government prosecutor (criminal cases), otherwise the plaintiff. Falls back to
+// the whole name when there's no "v." separator (e.g. "In re ...").
+function namedParty(caseName: string): string {
+  const parts = caseName.split(CASE_SEPARATOR);
+  const first = (parts[0] ?? caseName).trim();
+  if (parts.length > 1 && GOV_PLAINTIFF.test(first)) {
+    return parts.slice(1).join(" ").trim() || first;
+  }
+  return first || caseName;
 }
 
 export function deriveHandle(
@@ -31,7 +45,7 @@ export function deriveHandle(
   domain: string,
   taken: ReadonlySet<string> = new Set(),
 ): string {
-  let base = cap(slugify(plaintiff(caseName)), MAX_SLUG);
+  let base = cap(slugify(namedParty(caseName)), MAX_SLUG);
   if (!base) base = cap(slugify(`case-${docketNumber}`), MAX_SLUG);
 
   let candidate = base;
