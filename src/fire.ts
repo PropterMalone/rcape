@@ -9,17 +9,13 @@
 import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, entryToPost, truncate } from "./companionPost.js";
+import { courtLabel } from "./courts.js";
 import type { DocketEntryRecord, DocketRecord, PostRef } from "./map.js";
 
 const DOCKET = "org.rcape.docket";
 const ENTRY = "org.rcape.docketEntry";
 const POST = "app.bsky.feed.post";
 const PROFILE = "app.bsky.actor.profile";
-
-const COURT_LABELS: Record<string, string> = { mdd: "D. Md." };
-function courtLabel(id: string): string {
-  return COURT_LABELS[id] ?? id;
-}
 
 interface LiveEntry {
   rkey: string;
