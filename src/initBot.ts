@@ -21,7 +21,7 @@ const INTRO = truncate(
 );
 
 const BIO = truncate(
-  "I mirror U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket and I provision that case, filing by filing. A Librarian for the public record, tended by @proptermalone. Source: CourtListener.",
+  "I mirror U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket and I shelve it. How it works: https://gist.github.com/PropterMalone/579b9d77577fe45c3cb540905ba7d6ec Tended by @proptermalone.",
   256,
 );
 
