@@ -16,12 +16,12 @@ const PROFILE = "app.bsky.actor.profile";
 const POST = "app.bsky.feed.post";
 
 const INTRO = truncate(
-  "Ook. I am the Librarian of R.C. Ape. Mention me with a CourtListener docket — a link or its id — and I'll shelve that federal case here as its own archive: every filing, signed and in order. Unofficial; source: CourtListener.",
+  "Ook. I am the Librarian of R.C. Ape. Mention me with a CourtListener docket (a link or its id) and I'll shelve that federal case here as its own archive: every filing, signed and in order. Unofficial; source: CourtListener.",
   300,
 );
 
 const BIO = truncate(
-  "Unofficial: I mirror U.S. federal court dockets as native AT Protocol repos. Mention me with a CourtListener docket and I provision that case, filing by filing — a Pratchett-Librarian for the public record. Tended by @proptermalone. Source: CourtListener.",
+  "Unofficial: I mirror U.S. federal court dockets as native AT Protocol repos. Mention me with a CourtListener docket and I provision that case, filing by filing. A Pratchett-Librarian for the public record, tended by @proptermalone. Source: CourtListener.",
   256,
 );
 

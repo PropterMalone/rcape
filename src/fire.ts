@@ -6,6 +6,7 @@
 // NOT part of the backfill. `fireBackfill` is the callable core (also used by the
 // provisioner); the CLI adds a `--dry-run` preview and `--force` override.
 
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, entryToPost, truncate } from "./companionPost.js";
@@ -56,13 +57,13 @@ export function buildProfileAndSeed(docket: DocketRecord): ProfileAndSeed {
     $type: PROFILE,
     displayName: truncate(docket.caseName, 64),
     description: truncate(
-      `Unofficial mirror of federal docket ${docket.docketNumber} (${courtLabel(docket.court)}), Judge ${docket.assignedJudge}. Each filing is a signed, content-addressed record — browse the docket or follow for new filings. Source: CourtListener.`,
+      `Unofficial mirror of federal docket ${docket.docketNumber} (${courtLabel(docket.court)}), Judge ${docket.assignedJudge}. Signed, content-addressed filings; browse the docket or follow for new ones. Shelved by @ape.rcape.org. Source: CourtListener.`,
       256,
     ),
     labels: BOT_SELF_LABEL,
   };
   const seedText = truncate(
-    `${docket.caseName} (${docket.docketNumber}) is now mirrored here, filing by filing — browse the docket as signed records or follow for new activity. Unofficial; source: CourtListener.`,
+    `${docket.caseName} (${docket.docketNumber}) is now mirrored here, filing by filing. Browse the docket as signed records, or follow for new activity. Unofficial; source: CourtListener.`,
     300,
   );
   return { profile, seedText };
@@ -88,6 +89,21 @@ export async function fireBackfill(
   const now = new Date().toISOString();
   const { profile, seedText } = buildProfileAndSeed(docket);
 
+  // Same seal avatar as the bot, so each case thread reads as part of the
+  // library. Backfill still succeeds if the asset is missing.
+  let avatar: unknown;
+  try {
+    const path = fileURLToPath(
+      new URL("../assets/avatar.png", import.meta.url),
+    );
+    avatar = await repo.uploadBlob(
+      new Uint8Array(await readFile(path)),
+      "image/png",
+    );
+  } catch (e) {
+    console.warn(`  no case avatar set: ${e instanceof Error ? e.message : e}`);
+  }
+
   const seed = await repo.createRecord(POST, {
     $type: POST,
     text: seedText,
@@ -96,6 +112,7 @@ export async function fireBackfill(
   });
   await repo.putRecord(PROFILE, "self", {
     ...profile,
+    ...(avatar ? { avatar } : {}),
     pinnedPost: { uri: seed.uri, cid: seed.cid },
     createdAt: now,
   });
