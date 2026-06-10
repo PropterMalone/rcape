@@ -1,7 +1,8 @@
 // pattern: Imperative Shell
-// Resolves the bot's allowlist = the union of who the owner (@proptermalone)
-// follows and who follows them. These are AppView graph reads, NOT CourtListener
-// calls, so they don't touch the 125/day budget. Cached with a short TTL.
+// Resolves the bot's allowlist = the owner (@proptermalone) plus the union of
+// who the owner follows and who follows them. These are AppView graph reads, NOT
+// CourtListener calls, so they don't touch the 125/day budget. Cached with a
+// short TTL.
 
 // Minimal slice of AtpAgent's graph API (mockable in tests).
 export interface GraphClient {
@@ -68,11 +69,11 @@ async function collectDids(
 
 export async function resolveAllowlist(
   client: GraphClient,
-  actor: string,
+  ownerDid: string,
 ): Promise<Set<string>> {
   const follows = await collectDids(async (cursor) => {
     const { data } = await client.app.bsky.graph.getFollows({
-      actor,
+      actor: ownerDid,
       limit: 100,
       cursor,
     });
@@ -80,13 +81,15 @@ export async function resolveAllowlist(
   });
   const followers = await collectDids(async (cursor) => {
     const { data } = await client.app.bsky.graph.getFollowers({
-      actor,
+      actor: ownerDid,
       limit: 100,
       cursor,
     });
     return { dids: data.followers.map((f) => f.did), cursor: data.cursor };
   });
-  return new Set([...follows, ...followers]);
+  // The owner is always allowlisted: they must be able to drive their own bot,
+  // and they appear in neither their own follows nor their own followers.
+  return new Set([ownerDid, ...follows, ...followers]);
 }
 
 export class AllowlistCache {
@@ -102,7 +105,7 @@ export class AllowlistCache {
   // via RCAPE_ALLOWLIST_TTL_MS at the construction site.
   constructor(
     private readonly client: GraphClient,
-    private readonly actor: string,
+    private readonly ownerDid: string,
     private readonly ttlMs = 60 * 1000,
   ) {}
 
@@ -124,7 +127,7 @@ export class AllowlistCache {
   }
 
   private async refresh(): Promise<void> {
-    this.dids = await resolveAllowlist(this.client, this.actor);
+    this.dids = await resolveAllowlist(this.client, this.ownerDid);
     this.fetchedAt = Date.now();
   }
 }

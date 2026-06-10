@@ -37,10 +37,24 @@ function mockClient(): { client: GraphClient; calls: () => number } {
 }
 
 describe("resolveAllowlist", () => {
-  it("unions paginated follows with followers, deduped", async () => {
+  it("unions the owner with paginated follows and followers, deduped", async () => {
     const { client } = mockClient();
     const set = await resolveAllowlist(client, "proptermalone.test");
-    expect([...set].sort()).toEqual(["did:a", "did:b", "did:c", "did:d"]);
+    expect([...set].sort()).toEqual([
+      "did:a",
+      "did:b",
+      "did:c",
+      "did:d",
+      "proptermalone.test",
+    ]);
+  });
+
+  it("always includes the owner, even when absent from follows/followers", async () => {
+    // The owner must be able to drive their own bot; relying on a self-follow is
+    // fragile (unfollowing themselves would silently revoke access).
+    const { client } = mockClient();
+    const set = await resolveAllowlist(client, "did:owner");
+    expect(set.has("did:owner")).toBe(true);
   });
 });
 

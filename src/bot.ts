@@ -444,7 +444,7 @@ async function main(): Promise<void> {
   const allowlistTtlMs = Number(process.env.RCAPE_ALLOWLIST_TTL_MS ?? "60000");
   const deps: BotDeps = {
     agent,
-    allowlist: new AllowlistCache(agent.graph, ownerHandle, allowlistTtlMs),
+    allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,
