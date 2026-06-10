@@ -35,7 +35,18 @@ const DOCKET_KEYWORD = /\b(?:add|docket|case)\b/i;
 // present (CL internal docket ids are 7-9 digits).
 export function parseMention(
   text: string,
+  links: readonly string[] = [],
 ): { docketId: number } | { kind: "no-docket" } {
+  // Link-facet URLs are authoritative: Bluesky truncates long URLs in the visible
+  // post text (".../docket/71795...") while the facet keeps the full URL, so a
+  // pasted docket link would otherwise parse to a wrong, shorter id.
+  for (const uri of links) {
+    const m = uri.match(/\/docket\/(\d+)/i);
+    if (m?.[1]) {
+      const n = Number(m[1]);
+      if (inDocketRange(n)) return { docketId: n };
+    }
+  }
   const url = text.match(/\/docket\/(\d+)/i);
   if (url?.[1]) {
     const n = Number(url[1]);

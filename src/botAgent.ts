@@ -18,6 +18,10 @@ export interface MentionNotif {
   authorDid: string;
   authorHandle: string;
   text: string;
+  // URIs from the post's link facets. The full URL lives here even when `text`
+  // shows a Bluesky-truncated version (".../docket/71795..."), so docket parsing
+  // must prefer these over the visible text.
+  links?: string[];
   root: StrongRef; // thread root (the mention itself if it's a top-level post)
 }
 
@@ -61,14 +65,24 @@ export interface BotAgent {
 function toMention(n: RawNotification): MentionNotif {
   const record = n.record as {
     text?: string;
+    facets?: { features?: { $type?: string; uri?: string }[] }[];
     reply?: { root?: { uri: string; cid: string } };
   };
+  const links = (record.facets ?? [])
+    .flatMap((f) => f.features ?? [])
+    .filter(
+      (ft) =>
+        ft.$type === "app.bsky.richtext.facet#link" &&
+        typeof ft.uri === "string",
+    )
+    .map((ft) => ft.uri as string);
   return {
     uri: n.uri,
     cid: n.cid,
     authorDid: n.author.did,
     authorHandle: n.author.handle,
     text: record.text ?? "",
+    links,
     root: record.reply?.root ?? { uri: n.uri, cid: n.cid },
   };
 }

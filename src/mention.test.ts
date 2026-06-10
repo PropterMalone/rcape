@@ -91,4 +91,25 @@ describe("parseMention", () => {
       kind: "no-docket",
     });
   });
+
+  it("prefers a link-facet URL over truncated display text", () => {
+    // Bluesky truncates long URLs in the visible post text (".../docket/71795...")
+    // but the link facet preserves the full URL — parse the facet, not the text.
+    expect(
+      parseMention(
+        "@ape.rcape.org give me www.courtlistener.com/docket/71795... please",
+        [
+          "https://www.courtlistener.com/docket/71795960/united-states-v-rabbitt/",
+        ],
+      ),
+    ).toEqual({ docketId: 71795960 });
+  });
+
+  it("falls back to text parsing when no link facet carries a docket", () => {
+    expect(
+      parseMention("@ape.rcape.org docket 69777799 please", [
+        "https://example.com/not-a-docket",
+      ]),
+    ).toEqual({ docketId: 69777799 });
+  });
 });

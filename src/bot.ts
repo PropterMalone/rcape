@@ -265,7 +265,7 @@ async function classifyMention(
   deps: BotDeps,
   queue: Awaited<ReturnType<typeof loadQueue>>,
 ): Promise<Action> {
-  const parsed = parseMention(m.text);
+  const parsed = parseMention(m.text, m.links);
   const allowed = await deps.allowlist.has(m.authorDid);
   const ledger = await loadLedger(deps.cfg.ledgerPath);
   const existing =
