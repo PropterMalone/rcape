@@ -5,7 +5,7 @@
 // courts only (jurisdictions F, FD, FB, FS). Re-pull that endpoint to regenerate.
 // Unknown ids fall back to the raw court_id via courtLabel.
 
-const COURT_LABELS: Record<string, string> = {
+export const COURT_LABELS: Record<string, string> = {
   ag: "Op. Att\u2019y Gen.",
   akb: "Bankr. D. Alaska",
   akd: "D. Alaska",
