@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   }
   await repo.putRecord(PROFILE, "self", {
     $type: PROFILE,
-    displayName: "R.C. Ape, PhD, MLS",
+    displayName: "R.C. Ape, PhD, MLIS, LL.M.",
     description: BIO,
     ...(avatar ? { avatar } : {}),
     labels: BOT_SELF_LABEL,
