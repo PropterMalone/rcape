@@ -7,3 +7,6 @@ pds/data/
 pds/pds.env
 *.log
 .DS_Store
+
+# local Claude Code settings
+.claude/
