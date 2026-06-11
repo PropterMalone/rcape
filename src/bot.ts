@@ -9,9 +9,18 @@ import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
-import { parseClTokens } from "./courtlistener.js";
+import type { CaseHint } from "./caseHint.js";
+import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
+import type { ClSearchPage } from "./courtlistener.types.js";
 import { type MentionFacet, mentionFacets } from "./facet.js";
-import { findCase, loadLedger, selectToken } from "./ledger.js";
+import { GeminiClient, inferCaseFactory } from "./gemini.js";
+import {
+  chargeQuota,
+  findCase,
+  loadLedger,
+  mutateLedger,
+  selectToken,
+} from "./ledger.js";
 import { parseMention } from "./mention.js";
 import {
   type ProvisionConfig,
@@ -38,7 +47,11 @@ import {
   setAck,
 } from "./queue.js";
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
-import { scanThreadForDocket } from "./thread.js";
+import {
+  type ThreadView,
+  collectThreadPosts,
+  scanThreadForDocket,
+} from "./thread.js";
 
 // A full case fetch is ~17 CL calls (docket + entry/party pages). Require 20 —
 // headroom over RESERVED_CALLS_PER_CASE (provisionCase.ts = 17) — before STARTING
@@ -70,6 +83,9 @@ export type Action =
   | { kind: "reply-exists"; handle: string; did?: string }
   | { kind: "reply-declined" }
   | { kind: "reply-no-docket" }
+  // v1b: inference proposed a caption but the CL search didn't verify it as
+  // exactly one docket (matches = the search's count: 0 or ≥2).
+  | { kind: "reply-suggest"; caption: string; matches: number }
   | { kind: "skip" };
 
 export interface ClassifyInput {
@@ -117,6 +133,19 @@ export interface BotDeps {
     docketId: number,
     cfg: ProvisionConfig,
   ) => Promise<ProvisionResult>;
+  // v1b seams, both optional: absent (no RCAPE_GEMINI_API_KEY) the bot behaves
+  // exactly as v1a. inferCase proposes a {caption, courtId} hint from prose;
+  // searchDockets verifies it with ONE CL search call under `token`. Both
+  // return null on any failure — never throw (a hiccup must not abort a cycle).
+  inferCase?: (
+    mentionText: string,
+    entries: { text: string }[],
+  ) => Promise<CaseHint | null>;
+  searchDockets?: (
+    caption: string,
+    courtId: string | undefined,
+    token: string,
+  ) => Promise<ClSearchPage | null>;
 }
 
 const today = (): string => new Date().toISOString().slice(0, 10);
@@ -168,6 +197,16 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       await deps.agent.reply(parent, m.root, text, replyFacets(text, deps));
     } else if (action.kind === "reply-no-docket") {
       await deps.agent.reply(parent, m.root, buildReply({ kind: "no-docket" }));
+    } else if (action.kind === "reply-suggest") {
+      await deps.agent.reply(
+        parent,
+        m.root,
+        buildReply({
+          kind: "suggest",
+          caption: action.caption,
+          matches: action.matches,
+        }),
+      );
     } else if (action.kind === "reply-exists") {
       const text = buildReply({ kind: "exists", handle: action.handle });
       await deps.agent.reply(
@@ -271,12 +310,51 @@ async function classifyMention(
   // an explicit docket LINK (a free getPostThread call — no LLM, no CL quota).
   // Best-effort: a failed fetch falls through to the no-docket reply, never
   // throws (a thread read must not abort the cycle).
+  let thread: ThreadView | null = null;
   if ("kind" in parsed) {
-    const thread = await deps.agent.getPostThread(m.uri).catch(() => null);
+    thread = await deps.agent.getPostThread(m.uri).catch(() => null);
     const hit = thread ? scanThreadForDocket(thread) : null;
     if (hit) parsed = hit;
   }
+  // `allowed` is checked BEFORE prose inference: the steps below spend Gemini
+  // calls and a CL quota call, and must be reserved for allowlisted requesters
+  // (the link paths above are free, so they may run for anyone).
   const allowed = await deps.allowlist.has(m.authorDid);
+  // v1b: still no docket → Gemini proposes a {caption, courtId} hint from the
+  // mention + thread prose, and ONE CL search verifies it. Provision only on an
+  // exactly-one match — the confidence gate is the search-result shape, never
+  // the model's own confidence (which can hallucinate a plausible caption).
+  // Every failure (no hint, no quota, search error) degrades to the no-docket
+  // reply: the requester is asked for a link, nothing is queued.
+  if ("kind" in parsed && allowed && deps.inferCase && deps.searchDockets) {
+    const hint = await deps
+      .inferCase(m.text, collectThreadPosts(thread ?? undefined))
+      .catch(() => null);
+    if (hint) {
+      const before = await loadLedger(deps.cfg.ledgerPath);
+      const token = selectToken(before, deps.cfg.tokens, today(), 1);
+      if (token) {
+        // Charge the search call before issuing it, same crash-safe direction
+        // as provisioning's reservation: a crash mid-search wastes 1 budgeted
+        // call rather than leaving an unaccounted one.
+        await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
+          chargeQuota(fresh, 1, today(), token),
+        );
+        const res = await deps
+          .searchDockets(hint.caption, hint.courtId ?? undefined, token)
+          .catch(() => null);
+        if (res && res.count === 1 && res.results[0]) {
+          parsed = { docketId: res.results[0].docket_id };
+        } else if (res) {
+          return {
+            kind: "reply-suggest",
+            caption: hint.caption,
+            matches: res.count,
+          };
+        }
+      }
+    }
+  }
   const ledger = await loadLedger(deps.cfg.ledgerPath);
   const existing =
     "docketId" in parsed ? findCase(ledger, parsed.docketId) : undefined;
@@ -452,13 +530,39 @@ async function main(): Promise<void> {
     ownerHandle,
   );
   const allowlistTtlMs = Number(process.env.RCAPE_ALLOWLIST_TTL_MS ?? "60000");
+  // v1b prose inference is armed only when a Gemini key is configured; absent,
+  // the deps fields stay undefined and the bot behaves exactly as v1a.
+  const geminiKey = process.env.RCAPE_GEMINI_API_KEY;
+  const geminiModel = process.env.RCAPE_GEMINI_MODEL ?? "gemini-2.5-flash-lite";
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,
+    ...(geminiKey
+      ? {
+          inferCase: inferCaseFactory(new GeminiClient(geminiKey, geminiModel)),
+          // A fresh client per search: fresh lastRequestAt (no 13s pre-wait)
+          // and no throttle interleaving with a concurrent provision client.
+          searchDockets: async (caption, courtId, token) => {
+            try {
+              return await new CourtListenerClient(token).searchDockets(
+                caption,
+                courtId,
+              );
+            } catch (e) {
+              console.error(
+                "case search failed:",
+                e instanceof Error ? e.message : String(e),
+              );
+              return null;
+            }
+          },
+        }
+      : {}),
   };
+  if (geminiKey) console.log(`prose case-inference armed (${geminiModel}).`);
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);

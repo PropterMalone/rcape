@@ -5,7 +5,14 @@ import { describe, expect, it, vi } from "vitest";
 import { AllowlistCache, type GraphClient } from "./allowlist.js";
 import { type BotDeps, classify } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
-import { emptyLedger, recordCase, saveLedger } from "./ledger.js";
+import {
+  chargeQuota,
+  emptyLedger,
+  loadLedger,
+  quotaRemaining,
+  recordCase,
+  saveLedger,
+} from "./ledger.js";
 import type { ProvisionConfig, ProvisionResult } from "./provisionCase.js";
 import {
   type Job,
@@ -853,6 +860,48 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  it("v1b inference is NOT consulted when the thread already links a docket", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      const thread: ThreadView = {
+        post: { record: { text: noDocketMention().text } },
+        parent: {
+          post: {
+            record: {
+              text: "filed today",
+              facets: [
+                linkFacet("https://www.courtlistener.com/docket/69777799/x/"),
+              ],
+            },
+          },
+        },
+      };
+      const { agent } = mockAgent([noDocketMention()], thread);
+      const inferCase = vi.fn(async () => null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+        inferCase,
+        searchDockets: vi.fn(async () => null),
+      };
+
+      await pollOnce(deps);
+
+      expect(inferCase).not.toHaveBeenCalled();
+      expect((await loadQueue(queuePath)).jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not throw when the thread fetch fails (best-effort)", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
@@ -879,6 +928,247 @@ describe("thread-scan (v1a)", () => {
       expect((await loadQueue(queuePath)).jobs).toHaveLength(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("prose inference (v1b)", () => {
+  const proseMention = (): MentionNotif => ({
+    uri: "m-alice",
+    cid: "ca",
+    authorDid: "did:alice",
+    authorHandle: "alice.test",
+    text: "@ape.rcape.org can you shelve the Abrego Garcia case?",
+    root: { uri: "m-root", cid: "cr" },
+  });
+  const proseThread = (): ThreadView => ({
+    post: { record: { text: proseMention().text } },
+    parent: {
+      post: { record: { text: "huge ruling out of Maryland today" } },
+    },
+  });
+  const hint = { caption: "Abrego Garcia v. Noem", courtId: "mdd" };
+  const oneMatch = {
+    count: 1,
+    results: [
+      {
+        docket_id: 69777799,
+        caseName: "Abrego Garcia v. Noem",
+        court_id: "mdd",
+        docketNumber: "8:25-cv-00951",
+        dateFiled: "2025-03-24",
+      },
+    ],
+  };
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // Shared scaffolding: temp ledger+queue, mock agent over the prose thread,
+  // injectable inference/search seams.
+  async function run(opts: {
+    inferCase?: BotDeps["inferCase"];
+    searchDockets?: BotDeps["searchDockets"];
+    mention?: MentionNotif;
+    thread?: ThreadView | null;
+    prepLedger?: (
+      l: ReturnType<typeof emptyLedger>,
+    ) => ReturnType<typeof emptyLedger>;
+  }) {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    const ledgerPath = join(dir, "ledger.json");
+    const queuePath = join(dir, "queue.json");
+    const prep = opts.prepLedger ?? ((l) => l);
+    await saveLedger(ledgerPath, prep(emptyLedger()));
+    const { agent, replies } = mockAgent(
+      [opts.mention ?? proseMention()],
+      opts.thread === undefined ? proseThread() : opts.thread,
+    );
+    const deps: BotDeps = {
+      agent,
+      allowlist: new AllowlistCache(agent.graph, "owner.test"),
+      cfg: baseCfg(ledgerPath),
+      queuePath,
+      provision: provisionStub,
+      inferCase: opts.inferCase,
+      searchDockets: opts.searchDockets,
+    };
+    await pollOnce(deps);
+    return {
+      replies,
+      queue: await loadQueue(queuePath),
+      ledger: await loadLedger(ledgerPath),
+      cleanup: () => rm(dir, { recursive: true, force: true }),
+    };
+  }
+
+  it("provisions on an exactly-one search match, charging exactly 1 CL call for the search", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const searchDockets = vi.fn(async () => oneMatch);
+    const r = await run({ inferCase, searchDockets });
+    try {
+      expect(inferCase).toHaveBeenCalledTimes(1);
+      // The hint flows verbatim into the search, with the selected token.
+      expect(searchDockets).toHaveBeenCalledWith(
+        "Abrego Garcia v. Noem",
+        "mdd",
+        "t",
+      );
+      // Full ack + provision cycle on the searched docket id.
+      expect(r.replies).toHaveLength(2);
+      expect(r.replies[0]?.text).toContain("69777799");
+      expect(r.replies[1]?.text).toContain("@abrego-garcia.rcape.org");
+      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+      // The search charged exactly 1 against the day's 125 (provision is
+      // stubbed, so nothing else charges).
+      expect(quotaRemaining(r.ledger, todayStr, "t")).toBe(124);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("feeds the mention text and thread prose to the inference seam", async () => {
+    const inferCase = vi.fn(async () => null);
+    const r = await run({ inferCase, searchDockets: vi.fn(async () => null) });
+    try {
+      const [mentionText, entries] = inferCase.mock.calls[0] as unknown as [
+        string,
+        { text: string }[],
+      ];
+      expect(mentionText).toContain("shelve the Abrego Garcia case");
+      expect(entries.map((e) => e.text)).toContain(
+        "huge ruling out of Maryland today",
+      );
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("replies suggest (not enqueue) when the search finds nothing", async () => {
+    const r = await run({
+      inferCase: async () => hint,
+      searchDockets: async () => ({ count: 0, results: [] }),
+    });
+    try {
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text).toContain("Abrego Garcia v. Noem");
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("replies 'did you mean' (not enqueue) when the search is ambiguous", async () => {
+    const r = await run({
+      inferCase: async () => hint,
+      searchDockets: async () => ({ ...oneMatch, count: 3 }),
+    });
+    try {
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text.toLowerCase()).toContain("did you mean");
+      expect(r.replies[0]?.text).toContain("3");
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("degrades to the no-docket reply when inference returns null, without searching", async () => {
+    const searchDockets = vi.fn(async () => oneMatch);
+    const r = await run({ inferCase: async () => null, searchDockets });
+    try {
+      expect(searchDockets).not.toHaveBeenCalled();
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text).toContain("couldn't find a docket");
+      // No search → no quota spent.
+      expect(quotaRemaining(r.ledger, todayStr, "t")).toBe(125);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("degrades to the no-docket reply when the search itself fails (seam returns null)", async () => {
+    const r = await run({
+      inferCase: async () => hint,
+      searchDockets: async () => null,
+    });
+    try {
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text).toContain("couldn't find a docket");
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("skips the search when no token has quota headroom", async () => {
+    const searchDockets = vi.fn(async () => oneMatch);
+    const r = await run({
+      inferCase: async () => hint,
+      searchDockets,
+      prepLedger: (l) => chargeQuota(l, 125, todayStr, "t"),
+    });
+    try {
+      expect(searchDockets).not.toHaveBeenCalled();
+      expect(r.replies[0]?.text).toContain("couldn't find a docket");
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("never runs inference for a non-allowlisted author", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const r = await run({
+      inferCase,
+      searchDockets: vi.fn(async () => oneMatch),
+      mention: { ...proseMention(), uri: "m-bob", authorDid: "did:bob" },
+    });
+    try {
+      expect(inferCase).not.toHaveBeenCalled();
+      expect(r.replies[0]?.text).toContain("@proptermalone");
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("applies the already-provisioned dedupe to a search-derived docket id", async () => {
+    const r = await run({
+      inferCase: async () => hint,
+      searchDockets: async () => oneMatch,
+      prepLedger: (l) =>
+        recordCase(l, 69777799, {
+          handle: "abrego-garcia.rcape.org",
+          did: "did:case",
+          password: "pw",
+          createdAt: "2026-06-11",
+          completed: true,
+        }),
+    });
+    try {
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text).toContain("@abrego-garcia.rcape.org");
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("infers from the mention text alone on a top-level mention (no thread)", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const r = await run({
+      inferCase,
+      searchDockets: async () => oneMatch,
+      thread: null,
+    });
+    try {
+      const [mentionText, entries] = inferCase.mock.calls[0] as unknown as [
+        string,
+        { text: string }[],
+      ];
+      expect(mentionText).toContain("Abrego Garcia");
+      expect(entries).toHaveLength(0);
+      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await r.cleanup();
     }
   });
 });
