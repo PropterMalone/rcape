@@ -60,3 +60,22 @@ export function mentionFacets(
   // Stable order: by byteStart, so concurrent multi-handle replies are deterministic.
   return facets.sort((a, b) => a.index.byteStart - b.index.byteStart);
 }
+
+// A richtext record's outbound link URLs, drawn from its `#link` facets. Bluesky
+// truncates long URLs in the visible post text (".../docket/71795...") while the
+// facet preserves the full URL, so docket parsing must read these — not the text.
+// Shared so incoming-notification parsing (toMention) and thread-post scanning
+// extract links identically.
+export interface RichtextRecord {
+  facets?: { features?: { $type?: string; uri?: string }[] }[];
+}
+export function extractLinkFacets(record: RichtextRecord): string[] {
+  return (record.facets ?? [])
+    .flatMap((f) => f.features ?? [])
+    .filter(
+      (ft) =>
+        ft.$type === "app.bsky.richtext.facet#link" &&
+        typeof ft.uri === "string",
+    )
+    .map((ft) => ft.uri as string);
+}

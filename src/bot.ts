@@ -38,6 +38,7 @@ import {
   setAck,
 } from "./queue.js";
 import { OWNER_DISPLAY_HANDLE, buildReply } from "./reply.js";
+import { scanThreadForDocket } from "./thread.js";
 
 // A full case fetch is ~17 CL calls (docket + entry/party pages). Require 20 —
 // headroom over RESERVED_CALLS_PER_CASE (provisionCase.ts = 17) — before STARTING
@@ -265,7 +266,16 @@ async function classifyMention(
   deps: BotDeps,
   queue: Awaited<ReturnType<typeof loadQueue>>,
 ): Promise<Action> {
-  const parsed = parseMention(m.text, m.links);
+  let parsed = parseMention(m.text, m.links);
+  // When the mention itself carries no docket, scan the thread it replies to for
+  // an explicit docket LINK (a free getPostThread call — no LLM, no CL quota).
+  // Best-effort: a failed fetch falls through to the no-docket reply, never
+  // throws (a thread read must not abort the cycle).
+  if ("kind" in parsed) {
+    const thread = await deps.agent.getPostThread(m.uri).catch(() => null);
+    const hit = thread ? scanThreadForDocket(thread) : null;
+    if (hit) parsed = hit;
+  }
   const allowed = await deps.allowlist.has(m.authorDid);
   const ledger = await loadLedger(deps.cfg.ledgerPath);
   const existing =

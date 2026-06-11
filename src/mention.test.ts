@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDocketId, parseMention } from "./mention.js";
+import { parseDocketId, parseDocketLink, parseMention } from "./mention.js";
 
 describe("parseDocketId", () => {
   it("accepts a bare numeric id", () => {
@@ -24,6 +24,41 @@ describe("parseDocketId", () => {
     // >= 1e10 is well beyond CL docket id width — almost certainly a timestamp.
     expect(parseDocketId("10000000000")).toBeNull();
     expect(parseDocketId("99999999999999")).toBeNull();
+  });
+});
+
+describe("parseDocketLink", () => {
+  it("extracts a docket id from a /docket/ URL in the text", () => {
+    expect(
+      parseDocketLink(
+        "see https://www.courtlistener.com/docket/69777799/x/ here",
+      ),
+    ).toEqual({ docketId: 69777799 });
+  });
+
+  it("prefers a link-facet URL over truncated display text", () => {
+    expect(
+      parseDocketLink("give me www.courtlistener.com/docket/71795... please", [
+        "https://www.courtlistener.com/docket/71795960/united-states-v-rabbitt/",
+      ]),
+    ).toEqual({ docketId: 71795960 });
+  });
+
+  it("does NOT match a bare keyword+number — links only, unlike parseMention", () => {
+    // The bare-7-digit heuristic is mention-only; on arbitrary thread posts it is
+    // a false-positive magnet (a wrong guess burns ~17 CL calls).
+    expect(parseDocketLink("@ape.rcape.org add case 1234567")).toBeNull();
+    expect(parseDocketLink("docket 69777799 please")).toBeNull();
+  });
+
+  it("returns null for an out-of-range docket id in a URL", () => {
+    expect(parseDocketLink("/docket/10000000000/x/")).toBeNull();
+  });
+
+  it("returns null when no docket link is present", () => {
+    expect(
+      parseDocketLink("hello there", ["https://example.com/foo"]),
+    ).toBeNull();
   });
 });
 

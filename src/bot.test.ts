@@ -14,6 +14,7 @@ import {
   loadQueue,
   saveQueue,
 } from "./queue.js";
+import type { ThreadView } from "./thread.js";
 
 describe("classify", () => {
   const docket = { docketId: 69777799 } as const;
@@ -91,7 +92,7 @@ function allowGraph(dids: string[]): GraphClient {
   };
 }
 
-function mockAgent(mentions: MentionNotif[]) {
+function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
   const replies: {
     parent: StrongRef;
     text: string;
@@ -109,6 +110,7 @@ function mockAgent(mentions: MentionNotif[]) {
     updateSeen: async (seenAt) => {
       seenAts.push(seenAt);
     },
+    getPostThread: async () => thread,
   };
   return { agent, replies, seenAts };
 }
@@ -754,6 +756,127 @@ describe("drain branches", () => {
       q = await loadQueue(queuePath);
       expect(q.jobs[0]?.status).toBe("done");
       expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("thread-scan (v1a)", () => {
+  // The mention names no docket; the post it replies to links one. The bot must
+  // resolve it from the thread and provision exactly as if the link were pasted.
+  const noDocketMention = (): MentionNotif => ({
+    uri: "m-alice",
+    cid: "ca",
+    authorDid: "did:alice",
+    authorHandle: "alice.test",
+    text: "@ape.rcape.org can you add this one?",
+    root: { uri: "m-root", cid: "cr" },
+  });
+  const linkFacet = (uri: string) => ({
+    features: [{ $type: "app.bsky.richtext.facet#link", uri }],
+  });
+
+  it("provisions a docket linked only in an ancestor post", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      const thread: ThreadView = {
+        post: { record: { text: noDocketMention().text } },
+        parent: {
+          post: {
+            record: {
+              text: "this just got filed",
+              facets: [
+                linkFacet("https://www.courtlistener.com/docket/69777799/x/"),
+              ],
+            },
+          },
+        },
+      };
+      const { agent, replies } = mockAgent([noDocketMention()], thread);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      // Thread-derived docket drove a full ack + provision (ack carries the id,
+      // done carries the new @handle) — identical to a pasted-link mention.
+      expect(replies).toHaveLength(2);
+      expect(replies[0]?.text).toContain("69777799");
+      expect(replies[1]?.text).toContain("@abrego-garcia.rcape.org");
+      const q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.docketId).toBe(69777799);
+      expect(q.jobs[0]?.status).toBe("done");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replies no-docket (no enqueue) when neither mention nor thread links a docket", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      const thread: ThreadView = {
+        post: { record: { text: noDocketMention().text } },
+        parent: { post: { record: { text: "just vibes, no docket" } } },
+      };
+      const { agent, replies } = mockAgent([noDocketMention()], thread);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      // Exactly one reply (no-docket), nothing enqueued.
+      expect(replies).toHaveLength(1);
+      expect((await loadQueue(queuePath)).jobs).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw when the thread fetch fails (best-effort)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+
+      const { agent, replies } = mockAgent([noDocketMention()]);
+      agent.getPostThread = async () => {
+        throw new Error("getPostThread network failure");
+      };
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      // A failed thread read falls through to the no-docket reply, never aborts.
+      await expect(pollOnce(deps)).resolves.toBeUndefined();
+      expect(replies).toHaveLength(1);
+      expect((await loadQueue(queuePath)).jobs).toHaveLength(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

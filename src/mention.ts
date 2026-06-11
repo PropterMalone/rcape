@@ -29,17 +29,18 @@ export function parseDocketId(arg: string | undefined): number | null {
 // 125/day budget in three mentions). "add"/"docket"/"case" near the number.
 const DOCKET_KEYWORD = /\b(?:add|docket|case)\b/i;
 
-// Free mention text (e.g. "@ape.rcape.org please add
-// courtlistener.com/docket/69777799/..."). Prefer a docket URL (always trusted);
-// otherwise fall back to a standalone 7+ digit run ONLY when a docket keyword is
-// present (CL internal docket ids are 7-9 digits).
-export function parseMention(
+// A docket *link* — a CL `/docket/<id>/` URL carried in a link facet or written
+// in the visible text. The unambiguous, always-trusted signal. Link facets are
+// authoritative: Bluesky truncates long URLs in the visible post text
+// (".../docket/71795...") while the facet keeps the full URL, so a pasted docket
+// link would otherwise parse to a wrong, shorter id. Used both for the mention
+// itself and when scanning thread posts — where the bare-number heuristic below
+// is deliberately NOT applied (a stray 7-digit run in someone else's ancestor
+// post isn't addressed to the bot, and a wrong guess burns ~17 CL calls).
+export function parseDocketLink(
   text: string,
   links: readonly string[] = [],
-): { docketId: number } | { kind: "no-docket" } {
-  // Link-facet URLs are authoritative: Bluesky truncates long URLs in the visible
-  // post text (".../docket/71795...") while the facet keeps the full URL, so a
-  // pasted docket link would otherwise parse to a wrong, shorter id.
+): { docketId: number } | null {
   for (const uri of links) {
     const m = uri.match(/\/docket\/(\d+)/i);
     if (m?.[1]) {
@@ -52,6 +53,19 @@ export function parseMention(
     const n = Number(url[1]);
     if (inDocketRange(n)) return { docketId: n };
   }
+  return null;
+}
+
+// Free mention text (e.g. "@ape.rcape.org please add
+// courtlistener.com/docket/69777799/..."). Prefer a docket link (always trusted);
+// otherwise fall back to a standalone 7+ digit run ONLY when a docket keyword is
+// present (CL internal docket ids are 7-9 digits).
+export function parseMention(
+  text: string,
+  links: readonly string[] = [],
+): { docketId: number } | { kind: "no-docket" } {
+  const link = parseDocketLink(text, links);
+  if (link) return link;
   if (DOCKET_KEYWORD.test(text)) {
     const bare = text.match(/(?<!\d)(\d{7,})(?!\d)/);
     if (bare?.[1]) {

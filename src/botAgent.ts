@@ -7,10 +7,18 @@ import { AtpAgent } from "@atproto/api";
 import type { GraphClient } from "./allowlist.js";
 import { DEFAULT_PDS_HOST } from "./caseRepo.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
-import type { MentionFacet } from "./facet.js";
+import {
+  type MentionFacet,
+  type RichtextRecord,
+  extractLinkFacets,
+} from "./facet.js";
 import type { StrongRef } from "./queue.js";
+import type { ThreadView } from "./thread.js";
 
 const POST = "app.bsky.feed.post";
+// How many ancestor levels getPostThread returns for thread-scan. depth:0 skips
+// replies entirely (we only walk upward toward the root).
+const THREAD_PARENT_HEIGHT = 10;
 
 export interface MentionNotif {
   uri: string;
@@ -60,22 +68,18 @@ export interface BotAgent {
   // Mark notifications up to `seenAt` as read, so the bot account's unread badge
   // clears and the next listNotifications can rely on the server's seen marker.
   updateSeen(seenAt: string): Promise<void>;
+  // Fetch the thread rooted at `uri` (the mention) so a mention carrying no
+  // docket can still resolve one present in an ancestor or quoted post. Returns
+  // the raw thread view (or null when the post is gone); the caller scans it.
+  getPostThread(uri: string): Promise<ThreadView | null>;
 }
 
 function toMention(n: RawNotification): MentionNotif {
-  const record = n.record as {
+  const record = n.record as RichtextRecord & {
     text?: string;
-    facets?: { features?: { $type?: string; uri?: string }[] }[];
     reply?: { root?: { uri: string; cid: string } };
   };
-  const links = (record.facets ?? [])
-    .flatMap((f) => f.features ?? [])
-    .filter(
-      (ft) =>
-        ft.$type === "app.bsky.richtext.facet#link" &&
-        typeof ft.uri === "string",
-    )
-    .map((ft) => ft.uri as string);
+  const links = extractLinkFacets(record);
   return {
     uri: n.uri,
     cid: n.cid,
@@ -167,6 +171,17 @@ export async function createBotAgent(opts: {
     },
     async updateSeen(seenAt): Promise<void> {
       await agent.app.bsky.notification.updateSeen({ seenAt });
+    },
+    async getPostThread(uri): Promise<ThreadView | null> {
+      const { data } = await agent.app.bsky.feed.getPostThread({
+        uri,
+        depth: 0,
+        parentHeight: THREAD_PARENT_HEIGHT,
+      });
+      // The atproto union (ThreadViewPost | NotFound | Blocked) is wider than the
+      // structural slice thread.ts walks; the cast is sound (it reads only the
+      // fields that exist), and NotFound/Blocked roots scan to no docket.
+      return data.thread as unknown as ThreadView;
     },
   };
 }
