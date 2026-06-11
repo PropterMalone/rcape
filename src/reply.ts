@@ -30,6 +30,10 @@ export type ReplyKind =
   | { kind: "over-cap"; inFlight: number; docketId: number }
   | { kind: "declined" }
   | { kind: "no-docket" }
+  // v1b: prose inference proposed a caption but the CourtListener search
+  // didn't verify it as exactly one docket. matches is the search's count
+  // (0 = no such case found, ≥2 = ambiguous).
+  | { kind: "suggest"; caption: string; matches: number }
   | { kind: "not-found" }
   // Posted only after retries are exhausted, so the requester isn't left in
   // permanent silence after the ack.
@@ -73,6 +77,14 @@ export function buildReply(r: ReplyKind): string {
       // the missing docket — not a bare broadcast of instructions.
       text =
         "Ook? I hear you, but I couldn't find a docket in that. Point me at a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
+      break;
+    case "suggest":
+      // The guessed caption shows the requester what the Librarian understood,
+      // so a wrong guess is self-explanatory and the fix (a link) is obvious.
+      text =
+        r.matches === 0
+          ? `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Point me at a CourtListener docket link and I'll fetch it.`
+          : `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Give me the CourtListener link for yours and I'll fetch it.`;
       break;
     case "not-found":
       text =

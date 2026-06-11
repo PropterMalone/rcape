@@ -18,6 +18,8 @@ const all: ReplyKind[] = [
   { kind: "declined" },
   { kind: "no-docket" },
   { kind: "not-found" },
+  { kind: "suggest", caption: "United States v. Smith", matches: 0 },
+  { kind: "suggest", caption: "United States v. Smith", matches: 4 },
 ];
 
 describe("buildReply", () => {
@@ -98,6 +100,36 @@ describe("buildReply", () => {
     expect(buildReply({ kind: "no-docket" })).toContain(
       "courtlistener.com/docket",
     );
+  });
+
+  it("names the guessed caption when the search found nothing", () => {
+    const text = buildReply({
+      kind: "suggest",
+      caption: "United States v. Smith",
+      matches: 0,
+    });
+    expect(text).toContain("United States v. Smith");
+    expect(text.toLowerCase()).toContain("courtlistener");
+  });
+
+  it("asks 'did you mean' with the match count when the search was ambiguous", () => {
+    const text = buildReply({
+      kind: "suggest",
+      caption: "United States v. Smith",
+      matches: 4,
+    });
+    expect(text).toContain("United States v. Smith");
+    expect(text).toContain("4");
+    expect(text.toLowerCase()).toContain("did you mean");
+  });
+
+  it("clamps a long guessed caption while keeping the reply under the post limit", () => {
+    const text = buildReply({
+      kind: "suggest",
+      caption: "An Extraordinarily Long Caption ".repeat(20),
+      matches: 2,
+    });
+    expect(graphemes(text)).toBeLessThanOrEqual(300);
   });
 
   it("reports the queue position on a quota-deferred request", () => {
