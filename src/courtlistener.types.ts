@@ -49,6 +49,21 @@ export interface ClParty {
   attorneys?: ClAttorney[];
 }
 
+// Search API (/search/?type=d) result fields are camelCase, unlike the REST
+// list endpoints' snake_case — except docket_id and court_id, which stay snake.
+export interface ClSearchDocket {
+  docket_id: number;
+  caseName: string | null;
+  court_id: string | null;
+  docketNumber: string | null;
+  dateFiled: string | null;
+}
+
+export interface ClSearchPage {
+  count: number;
+  results: ClSearchDocket[];
+}
+
 export interface ClPage<T> {
   // CL returns count as a number, or a URL string when computed asynchronously.
   count: number | string | null;

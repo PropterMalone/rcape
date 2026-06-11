@@ -56,6 +56,79 @@ describe("CourtListenerClient pagination SSRF guard", () => {
   });
 });
 
+describe("searchDockets", () => {
+  it("queries type=d with a quoted caseName operator and the court filter", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      return res(200, {
+        count: 1,
+        results: [{ docket_id: 69777799, caseName: "Abrego Garcia v. Noem" }],
+      });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.searchDockets("Abrego Garcia v. Noem", "mdd");
+    expect(out.count).toBe(1);
+    expect(out.results[0]?.docket_id).toBe(69777799);
+    expect(seen).toHaveLength(1);
+    const url = new URL(seen[0] as string);
+    expect(url.pathname).toBe("/api/rest/v4/search/");
+    expect(url.searchParams.get("type")).toBe("d");
+    expect(url.searchParams.get("q")).toBe('caseName:"Abrego Garcia v. Noem"');
+    expect(url.searchParams.get("court")).toBe("mdd");
+  });
+
+  it("omits the court filter when no court id is given", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      return res(200, { count: 0, results: [] });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    await client.searchDockets("United States v. Smith");
+    expect(new URL(seen[0] as string).searchParams.has("court")).toBe(false);
+  });
+
+  it("never paginates — one search is one quota call, count rides on page 1", async () => {
+    const fetchImpl = vi.fn(async () =>
+      res(200, {
+        count: 40,
+        next: "https://www.courtlistener.com/api/rest/v4/search/?cursor=abc",
+        results: [{ docket_id: 1 }, { docket_id: 2 }],
+      }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.searchDockets("Smith v. Jones");
+    expect(out.count).toBe(40);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to results.length when count is not a number", async () => {
+    const fetchImpl = vi.fn(async () =>
+      res(200, { count: null, results: [{ docket_id: 5 }] }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.searchDockets("Doe v. Roe");
+    expect(out.count).toBe(1);
+  });
+});
+
 describe("parseClTokens", () => {
   it("parses a comma-separated pool, trimming and de-duping", () => {
     expect(

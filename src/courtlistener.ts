@@ -8,6 +8,8 @@ import type {
   ClDocketEntry,
   ClPage,
   ClParty,
+  ClSearchDocket,
+  ClSearchPage,
 } from "./courtlistener.types.js";
 
 // Parse the configured CourtListener token pool. COURTLISTENER_API_TOKENS
@@ -106,6 +108,30 @@ export class CourtListenerClient {
 
   getDocket(id: number): Promise<ClDocket> {
     return this.get<ClDocket>(`/dockets/${id}/`);
+  }
+
+  // One page only, never paginate: a search is exactly one quota call, and the
+  // v1b gate only needs `count` (on page 1) plus the first result. The caption
+  // must already be sanitized (validateCaseHint) — it lands inside a quoted
+  // caseName phrase operator.
+  async searchDockets(
+    caption: string,
+    courtId?: string,
+  ): Promise<ClSearchPage> {
+    const params = new URLSearchParams({
+      type: "d",
+      q: `caseName:"${caption}"`,
+    });
+    if (courtId) params.set("court", courtId);
+    const page = await this.get<ClPage<ClSearchDocket>>(
+      `/search/?${params.toString()}`,
+    );
+    // Search counts are numbers in practice; the URL-string/null forms belong
+    // to the async-count list endpoints. Fall back to the visible page length
+    // (page size 20 ≫ 1, so the exactly-one gate stays sound).
+    const count =
+      typeof page.count === "number" ? page.count : page.results.length;
+    return { count, results: page.results };
   }
 
   private async getAllPages<T>(firstPath: string): Promise<T[]> {
