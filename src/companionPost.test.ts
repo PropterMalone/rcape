@@ -1,6 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { entryToPost, truncate } from "./companionPost.js";
+import { backdatedCreatedAts, entryToPost, truncate } from "./companionPost.js";
 import type { DocketEntryRecord } from "./map.js";
+
+describe("backdatedCreatedAts", () => {
+  it("makes same-day filings strictly increasing (so the AppView feed shows all)", () => {
+    const out = backdatedCreatedAts([
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-15T00:00:00.000Z",
+    ]);
+    expect(new Set(out).size).toBe(4); // all unique
+    for (let i = 1; i < out.length; i++) {
+      expect(Date.parse(out[i] as string)).toBeGreaterThan(
+        Date.parse(out[i - 1] as string),
+      );
+    }
+    // first of each day keeps its filing date; same-day bumps stay within the day
+    expect(out[0]).toBe("2026-06-14T00:00:00.000Z");
+    expect((out[2] as string).slice(0, 10)).toBe("2026-06-14");
+    expect(out[3]).toBe("2026-06-15T00:00:00.000Z");
+  });
+
+  it("bumps a later entry whose date precedes the prior post, preserving order", () => {
+    const out = backdatedCreatedAts([
+      "2026-06-15T00:00:00.000Z",
+      "2026-06-14T00:00:00.000Z",
+    ]);
+    expect(Date.parse(out[1] as string)).toBeGreaterThan(
+      Date.parse(out[0] as string),
+    );
+  });
+
+  it("tolerates an unparseable date by stepping past the prior post", () => {
+    const out = backdatedCreatedAts(["2026-06-14T00:00:00.000Z", "not-a-date"]);
+    expect(Date.parse(out[1] as string)).toBeGreaterThan(
+      Date.parse(out[0] as string),
+    );
+  });
+});
 
 const entry: DocketEntryRecord = {
   $type: "org.rcape.docketEntry",

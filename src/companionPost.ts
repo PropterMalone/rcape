@@ -42,6 +42,27 @@ export function truncate(s: string, n: number): string {
     .join("")}…`;
 }
 
+// Backdated doc-posts must each get a UNIQUE, strictly-increasing createdAt.
+// CourtListener stamps a docket entry's date_filed as a DATE (midnight), so every
+// filing on a given day shares one timestamp — and Bluesky's AppView feed
+// collapses posts that share a sort key to ONE per timestamp, hiding all but one
+// filing per day even though every record exists on the PDS. Anchor each post at
+// its filing date, bumping by 1s whenever that would collide with or precede the
+// prior post: this keeps filing order and the displayed date (which derives from
+// dateFiled separately) while making every sortAt distinct. `dateFileds` must be
+// in publish order (the order fireBackfill iterates).
+export function backdatedCreatedAts(dateFileds: readonly string[]): string[] {
+  const STEP_MS = 1000;
+  let prevMs = Number.NEGATIVE_INFINITY;
+  return dateFileds.map((d) => {
+    const base = Date.parse(d);
+    const floor = prevMs + STEP_MS;
+    const ms = Math.max(Number.isNaN(base) ? floor : base, floor);
+    prevMs = ms;
+    return new Date(ms).toISOString();
+  });
+}
+
 export function entryToPost(
   entry: DocketEntryRecord,
   caseName: string,

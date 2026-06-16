@@ -9,7 +9,12 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
-import { BOT_SELF_LABEL, entryToPost, truncate } from "./companionPost.js";
+import {
+  BOT_SELF_LABEL,
+  backdatedCreatedAts,
+  entryToPost,
+  truncate,
+} from "./companionPost.js";
 import { courtLabel } from "./courts.js";
 import type { DocketEntryRecord, DocketRecord, PostRef } from "./map.js";
 
@@ -118,15 +123,20 @@ export async function fireBackfill(
   });
   console.log("profile + pinned seed published");
 
+  // Unique strictly-increasing createdAt per post (see backdatedCreatedAts): a
+  // shared date-only timestamp would make the AppView feed show one filing per
+  // day, hiding the rest. Order matches the publish loop below.
+  const createdAts = backdatedCreatedAts(entries.map((e) => e.value.dateFiled));
+
   let published = 0;
   const failed: string[] = [];
-  for (const e of entries) {
+  for (const [i, e] of entries.entries()) {
     try {
       const post = entryToPost(
         e.value,
         docket.caseName,
         caseUrl,
-        e.value.dateFiled,
+        createdAts[i] ?? e.value.dateFiled,
       );
       const created = await repo.createRecord(
         POST,
