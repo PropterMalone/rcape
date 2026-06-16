@@ -56,6 +56,19 @@ export function parseDocketLink(
   return null;
 }
 
+// A PACER/federal-court case number: `<office>:<2-digit-year>-<type>-<seq>`,
+// e.g. "0:26-cr-00115", "3:26-cv-05763", "1:24-md-03101". A trailing judge-initial
+// suffix (…-KMM-DTS) is intentionally excluded — CourtListener indexes the core
+// number. This is a strong, precise signal (unlike a guessed caption): the caller
+// searches CL by docket number, which resolves a single-docket case to exactly
+// one. (Multi-defendant criminal cases share one number across several dockets;
+// those still fall to the count≠1 suggest, same as any ambiguous request.)
+const CASE_NUMBER = /\b(\d{1,2}:\d{2}-[a-z]{2,3}-\d{3,6})\b/i;
+export function parseCaseNumber(text: string): string | null {
+  const m = text.match(CASE_NUMBER);
+  return m?.[1] ? m[1].toLowerCase() : null;
+}
+
 // Free mention text (e.g. "@ape.rcape.org please add
 // courtlistener.com/docket/69777799/..."). Prefer a docket link (always trusted);
 // otherwise fall back to a standalone 7+ digit run ONLY when a docket keyword is

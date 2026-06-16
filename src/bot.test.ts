@@ -977,6 +977,41 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  it("defers a quota-exhausted case once with a 'finish tomorrow' reply, leaving it queued to auto-resume", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        // Simulate a large docket outrunning its reservation mid-provision.
+        provision: async (): Promise<ProvisionResult> => ({
+          status: "quota-exhausted",
+          day: new Date().toISOString().slice(0, 10),
+        }),
+      };
+
+      await pollOnce(deps); // ack-enqueue + drain → quota-exhausted → deferred
+      const isDeferred = (t: string) => t.includes("finish it tomorrow");
+      expect(replies.filter((r) => isDeferred(r.text))).toHaveLength(1);
+      const q1 = await loadQueue(queuePath);
+      expect(q1.jobs[0]?.status).toBe("queued"); // NOT failed — auto-resumes
+      expect(q1.jobs[0]?.deferredNotified).toBe(true);
+
+      await pollOnce(deps); // next cycle: still deferred, but no duplicate notice
+      expect(replies.filter((r) => isDeferred(r.text))).toHaveLength(1);
+      expect((await loadQueue(queuePath)).jobs[0]?.status).toBe("queued");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("provisions when a docket link is handed back as a reply to the bot", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
@@ -1124,6 +1159,7 @@ describe("prose inference (v1b)", () => {
   async function run(opts: {
     inferCase?: BotDeps["inferCase"];
     searchDockets?: BotDeps["searchDockets"];
+    searchByDocketNumber?: BotDeps["searchByDocketNumber"];
     mention?: MentionNotif;
     thread?: ThreadView | null;
     prepLedger?: (
@@ -1148,6 +1184,7 @@ describe("prose inference (v1b)", () => {
       provision: provisionStub,
       inferCase: opts.inferCase,
       searchDockets: opts.searchDockets,
+      searchByDocketNumber: opts.searchByDocketNumber,
     };
     await pollOnce(deps);
     return {
@@ -1157,6 +1194,71 @@ describe("prose inference (v1b)", () => {
       cleanup: () => rm(dir, { recursive: true, force: true }),
     };
   }
+
+  const caseNumberMention = (): MentionNotif => ({
+    uri: "m-alice",
+    cid: "ca",
+    authorDid: "did:alice",
+    authorHandle: "alice.test",
+    text: "@ape.rcape.org pull 0:26-cr-00115 please",
+    root: { uri: "m-root", cid: "cr" },
+  });
+
+  it("resolves a case number via docket-number search ahead of Gemini (count===1 provisions)", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const searchByDocketNumber = vi.fn(async () => oneMatch);
+    const r = await run({
+      mention: caseNumberMention(),
+      thread: null,
+      inferCase,
+      searchDockets: vi.fn(async () => null),
+      searchByDocketNumber,
+    });
+    try {
+      expect(searchByDocketNumber).toHaveBeenCalledWith(
+        "0:26-cr-00115",
+        expect.any(String),
+      );
+      expect(inferCase).not.toHaveBeenCalled(); // case number wins; Gemini skipped
+      expect(r.replies).toHaveLength(2); // ack + provisioned
+      expect(r.replies[0]?.text).toContain("69777799");
+      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("suggests (no Gemini) when a case number maps to multiple dockets", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const searchByDocketNumber = vi.fn(async () => ({
+      count: 16,
+      results: [
+        {
+          docket_id: 1,
+          caseName: "United States v. Sant",
+          court_id: "mnd",
+          docketNumber: "0:26-cr-00115",
+          dateFiled: "2026-06-14",
+        },
+      ],
+    }));
+    const r = await run({
+      mention: caseNumberMention(),
+      thread: null,
+      inferCase,
+      searchDockets: vi.fn(async () => null),
+      searchByDocketNumber,
+    });
+    try {
+      expect(inferCase).not.toHaveBeenCalled();
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text).toContain("0:26-cr-00115");
+      expect(r.replies[0]?.text).toContain("16");
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
 
   it("provisions on an exactly-one search match, charging exactly 1 CL call for the search", async () => {
     const inferCase = vi.fn(async () => hint);

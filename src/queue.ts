@@ -28,6 +28,9 @@ export interface Job {
   createdAt: string;
   retryCount?: number; // transient-failure attempts so far (drives backoff + cap)
   nextAttemptAt?: string; // ISO time the retrying job becomes drainable again
+  // true once the quota-deferred "I'll finish tomorrow" reply was posted, so it
+  // isn't re-posted every poll cycle the job sits queued awaiting the daily reset.
+  deferredNotified?: boolean;
 }
 
 export interface QueueState {
@@ -150,6 +153,16 @@ export function markDone(q: QueueState, docketId: number): QueueState {
 
 export function markFailed(q: QueueState, docketId: number): QueueState {
   return patchJob(q, docketId, { status: "failed" });
+}
+
+// Record that the quota-deferred "I'll finish tomorrow" reply was posted for this
+// job. Does NOT change status — the job stays queued and the next day's drain (on
+// fresh budget) resumes it automatically; this flag only dedupes the notice.
+export function markDeferredNotified(
+  q: QueueState,
+  docketId: number,
+): QueueState {
+  return patchJob(q, docketId, { deferredNotified: true });
 }
 
 // Back a transiently-failed job off: bump retryCount and set nextAttemptAt so

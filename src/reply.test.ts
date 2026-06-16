@@ -20,6 +20,8 @@ const all: ReplyKind[] = [
   { kind: "not-found" },
   { kind: "suggest", caption: "United States v. Smith", matches: 0 },
   { kind: "suggest", caption: "United States v. Smith", matches: 4 },
+  { kind: "deferred", docketId: 69777799 },
+  { kind: "failed", docketId: 69777799 },
 ];
 
 describe("buildReply", () => {

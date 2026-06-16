@@ -134,6 +134,27 @@ export class CourtListenerClient {
     return { count, results: page.results };
   }
 
+  // Search by docket number (e.g. "0:26-cr-00115"). One page, one quota call,
+  // same shape + count gate as searchDockets — but a far more precise signal than
+  // a guessed caption. The number is regex-extracted (parseCaseNumber), so it
+  // carries only `[\d:a-z-]` and is safe inside the quoted docketNumber operator.
+  async searchByDocketNumber(
+    caseNumber: string,
+    courtId?: string,
+  ): Promise<ClSearchPage> {
+    const params = new URLSearchParams({
+      type: "d",
+      q: `docketNumber:"${caseNumber}"`,
+    });
+    if (courtId) params.set("court", courtId);
+    const page = await this.get<ClPage<ClSearchDocket>>(
+      `/search/?${params.toString()}`,
+    );
+    const count =
+      typeof page.count === "number" ? page.count : page.results.length;
+    return { count, results: page.results };
+  }
+
   private async getAllPages<T>(firstPath: string): Promise<T[]> {
     const out: T[] = [];
     let next: string | null = firstPath;

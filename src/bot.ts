@@ -21,7 +21,7 @@ import {
   mutateLedger,
   selectToken,
 } from "./ledger.js";
-import { parseMention } from "./mention.js";
+import { parseCaseNumber, parseMention } from "./mention.js";
 import {
   type ProvisionConfig,
   type ProvisionResult,
@@ -36,6 +36,7 @@ import {
   hasSeen,
   isActive,
   loadQueue,
+  markDeferredNotified,
   markDone,
   markFailed,
   markRetrying,
@@ -65,15 +66,15 @@ const MIN_QUOTA_FOR_CASE = 20;
 // ~17 = ~51 calls), so one user can't monopolize the queue or the quota.
 const PER_REQUESTER_CAP = 3;
 
-// Transient provision errors back off and retry rather than failing outright:
-// after MAX_PROVISION_RETRIES attempts the job is failed and the requester gets
-// an apologetic reply. Backoff grows with the attempt count so a flapping PDS or
-// CL hiccup is given time to recover without head-of-line blocking the queue.
 // Matches the owner's launch-announcement post so the bot acknowledges it with a
 // bare "Ook." rather than the no-docket nudge. Owner-gated at the call site;
 // tolerant of "R.C. Ape" / "RC Ape" punctuation+spacing.
 const ANNOUNCEMENT_MARKER = /announcing\s+r\.?\s*c\.?\s*ape/i;
 
+// Transient provision errors back off and retry rather than failing outright:
+// after MAX_PROVISION_RETRIES attempts the job is failed and the requester gets
+// an apologetic reply. Backoff grows with the attempt count so a flapping PDS or
+// CL hiccup is given time to recover without head-of-line blocking the queue.
 const MAX_PROVISION_RETRIES = 3;
 const RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
 
@@ -150,6 +151,14 @@ export interface BotDeps {
   searchDockets?: (
     caption: string,
     courtId: string | undefined,
+    token: string,
+  ) => Promise<ClSearchPage | null>;
+  // Independent of Gemini: when the mention names a PACER case number, search CL
+  // by docket number (precise) instead of inferring a caption. Always wired (it
+  // needs only a CL token), so case-number resolution works even with no Gemini
+  // key. Returns null on any failure (degrade to the no-docket reply).
+  searchByDocketNumber?: (
+    caseNumber: string,
     token: string,
   ) => Promise<ClSearchPage | null>;
 }
@@ -351,10 +360,41 @@ async function classifyMention(
     const hit = thread ? scanThreadForDocket(thread) : null;
     if (hit) parsed = hit;
   }
-  // `allowed` is checked BEFORE prose inference: the steps below spend Gemini
-  // calls and a CL quota call, and must be reserved for allowlisted requesters
-  // (the link paths above are free, so they may run for anyone).
+  // `allowed` is checked BEFORE the search/inference steps: they spend a CL quota
+  // call (and Gemini), and must be reserved for allowlisted requesters (the link
+  // paths above are free, so they may run for anyone).
   const allowed = await deps.allowlist.has(m.authorDid);
+  // Still no docket → if the mention names a PACER case number (e.g.
+  // "0:26-cr-00115"), search CL by docket number FIRST: it's a precise signal, so
+  // it's cheaper (no Gemini) and more reliable than a guessed caption, and it runs
+  // even when Gemini is unarmed. count===1 provisions; any other count (a
+  // multi-defendant case shares one number across dockets) degrades to a suggest —
+  // we do NOT fall through to Gemini, whose caption guess can't beat an exact
+  // number. Charge the search call before issuing it (crash-safe direction).
+  if ("kind" in parsed && allowed && deps.searchByDocketNumber) {
+    const caseNumber = parseCaseNumber(m.text);
+    if (caseNumber) {
+      const before = await loadLedger(deps.cfg.ledgerPath);
+      const token = selectToken(before, deps.cfg.tokens, today(), 1);
+      if (token) {
+        await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
+          chargeQuota(fresh, 1, today(), token),
+        );
+        const res = await deps
+          .searchByDocketNumber(caseNumber, token)
+          .catch(() => null);
+        if (res && res.count === 1 && res.results[0]) {
+          parsed = { docketId: res.results[0].docket_id };
+        } else if (res) {
+          return {
+            kind: "reply-suggest",
+            caption: caseNumber,
+            matches: res.count,
+          };
+        }
+      }
+    }
+  }
   // v1b: still no docket → Gemini proposes a {caption, courtId} hint from the
   // mention + thread prose, and ONE CL search verifies it. Provision only on an
   // exactly-one match — the confidence gate is the search-result shape, never
@@ -418,6 +458,26 @@ async function classifyMention(
   });
 }
 
+// Post the one-time "I've hit today's CL limit; I'll finish tomorrow" reply for a
+// job the daily budget deferred, and persist the dedupe flag. No-op if already
+// sent. Returns the (possibly updated) queue. The job stays queued either way —
+// the deferral is purely a notice; next day's drain resumes it.
+async function notifyDeferred(
+  deps: BotDeps,
+  queue: QueueState,
+  job: Job,
+): Promise<QueueState> {
+  if (job.deferredNotified) return queue;
+  const next = markDeferredNotified(queue, job.docketId);
+  await persistQueue(deps.queuePath, next);
+  await deps.agent.reply(
+    job.ackRef ?? job.mention,
+    job.rootRef,
+    buildReply({ kind: "deferred", docketId: job.docketId }),
+  );
+  return next;
+}
+
 async function drain(
   deps: BotDeps,
   provision: (id: number, cfg: ProvisionConfig) => Promise<ProvisionResult>,
@@ -444,9 +504,12 @@ async function drain(
     // is the bot's own single-writer in-memory authority, so re-reading it per
     // iteration would just re-load what we already hold.
     const ledger = await loadLedger(deps.cfg.ledgerPath);
-    // No token in the pool has room for a whole case → stop draining; resume
-    // after the daily reset (or once an in-flight reservation reconciles down).
+    // No token in the pool has room for a whole case → stop draining. The job
+    // stays queued and the next day's drain (fresh budget) resumes it
+    // automatically — no new request needed. Tell the requester once that their
+    // acked case is paused until tomorrow (the flag dedupes across cycles).
     if (!selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE)) {
+      queue = await notifyDeferred(deps, queue, job);
       break;
     }
 
@@ -479,7 +542,10 @@ async function drain(
         queue = markFailed(queue, job.docketId);
       }
     } else {
-      // quota-exhausted: leave the job queued and resume after the daily reset.
+      // quota-exhausted mid-provision (a large docket's entry pagination outran
+      // the reservation): leave the job queued — the next day's drain resumes it
+      // automatically. Notify the requester once that it'll finish tomorrow.
+      queue = await notifyDeferred(deps, queue, job);
       break;
     }
     await persistQueue(deps.queuePath, queue);
@@ -575,6 +641,21 @@ async function main(): Promise<void> {
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,
+    // Always wired (no Gemini needed): a fresh client per call (no throttle
+    // interleaving with a concurrent provision client / no 13s pre-wait).
+    searchByDocketNumber: async (caseNumber, token) => {
+      try {
+        return await new CourtListenerClient(token).searchByDocketNumber(
+          caseNumber,
+        );
+      } catch (e) {
+        console.error(
+          "docket-number search failed:",
+          e instanceof Error ? e.message : String(e),
+        );
+        return null;
+      }
+    },
     ...(geminiKey
       ? {
           inferCase: inferCaseFactory(new GeminiClient(geminiKey, geminiModel)),

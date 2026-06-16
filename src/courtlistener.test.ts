@@ -129,6 +129,44 @@ describe("searchDockets", () => {
   });
 });
 
+describe("searchByDocketNumber", () => {
+  it("queries type=d with a quoted docketNumber operator", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      return res(200, {
+        count: 1,
+        results: [{ docket_id: 73482575, caseName: "Kahn v. Anthropic PBC" }],
+      });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.searchByDocketNumber("3:26-cv-05763");
+    expect(out.count).toBe(1);
+    expect(out.results[0]?.docket_id).toBe(73482575);
+    const url = new URL(seen[0] as string);
+    expect(url.pathname).toBe("/api/rest/v4/search/");
+    expect(url.searchParams.get("type")).toBe("d");
+    expect(url.searchParams.get("q")).toBe('docketNumber:"3:26-cv-05763"');
+  });
+
+  it("reports the full count for a multi-docket case number (gate then suggests)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      res(200, { count: 16, results: [{ docket_id: 1 }, { docket_id: 2 }] }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.searchByDocketNumber("0:26-cr-00115");
+    expect(out.count).toBe(16);
+  });
+});
+
 describe("parseClTokens", () => {
   it("parses a comma-separated pool, trimming and de-duping", () => {
     expect(

@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parseDocketId, parseDocketLink, parseMention } from "./mention.js";
+import {
+  parseCaseNumber,
+  parseDocketId,
+  parseDocketLink,
+  parseMention,
+} from "./mention.js";
+
+describe("parseCaseNumber", () => {
+  it("extracts a civil case number", () => {
+    expect(parseCaseNumber("can you pull 3:26-cv-05763")).toBe("3:26-cv-05763");
+  });
+
+  it("extracts a criminal case number and drops the judge-initial suffix", () => {
+    expect(parseCaseNumber("CASE 0:26-cr-00115-KMM-DTS")).toBe("0:26-cr-00115");
+  });
+
+  it("handles a 3-letter type code (md) and 1-digit office", () => {
+    expect(parseCaseNumber("the 1:24-md-03101 MDL")).toBe("1:24-md-03101");
+  });
+
+  it("lowercases the type code", () => {
+    expect(parseCaseNumber("0:26-CR-00115")).toBe("0:26-cr-00115");
+  });
+
+  it("returns null when no case number is present", () => {
+    expect(parseCaseNumber("@ape please add the Anthropic case")).toBeNull();
+    // a bare CL docket id is NOT a case number
+    expect(parseCaseNumber("docket 73482575")).toBeNull();
+  });
+});
 
 describe("parseDocketId", () => {
   it("accepts a bare numeric id", () => {

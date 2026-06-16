@@ -35,6 +35,11 @@ export type ReplyKind =
   // (0 = no such case found, ≥2 = ambiguous).
   | { kind: "suggest"; caption: string; matches: number }
   | { kind: "not-found" }
+  // Posted once when today's CourtListener budget runs out before a started
+  // (acked) case could finish — so a large docket that exceeds the daily limit
+  // mid-shelving doesn't leave the requester waiting on a "shelved" reply that
+  // won't come until the next day's reset.
+  | { kind: "deferred"; docketId: number }
   // Posted only after retries are exhausted, so the requester isn't left in
   // permanent silence after the ack.
   | { kind: "failed"; docketId: number };
@@ -90,6 +95,9 @@ export function buildReply(r: ReplyKind): string {
     case "not-found":
       text =
         "Ook. No such docket in CourtListener's stacks. Double-check the id or link?";
+      break;
+    case "deferred":
+      text = `Ook. I've reached today's CourtListener limit — docket ${r.docketId} is shelved in the queue and I'll finish it tomorrow.`;
       break;
     case "failed":
       text = `Ook. I couldn't shelve docket ${r.docketId} — the stacks gave way after a few tries. Mention me again later and I'll have another go.`;
