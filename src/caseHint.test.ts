@@ -82,6 +82,16 @@ describe("buildCaseHintPrompt", () => {
     expect(p).toContain("entry-number-9");
     expect(p).not.toContain("entry-number-10");
   });
+
+  it("instructs the bankruptcy caption form: bare debtor name, no 'v.', no 'In re'", () => {
+    // A bankruptcy case has no opposing party; forcing "Plaintiff v. Defendant"
+    // makes the model invent a defendant and the caseName search whiffs. CL also
+    // stores the bare debtor name, so an "In re" prefix breaks the phrase match.
+    const p = buildCaseHintPrompt("a chapter 11 filing", []);
+    expect(p.toLowerCase()).toContain("bankruptcy");
+    expect(p).toContain("In re"); // mentioned only to forbid it
+    expect(p.toLowerCase()).toContain("debtor");
+  });
 });
 
 describe("CASE_HINT_SCHEMA", () => {
@@ -140,5 +150,24 @@ describe("validateCaseHint", () => {
     expect(
       validateCaseHint({ caption: 'United "States" v.\u0000\nSmith' }),
     ).toEqual({ caption: "United States v. Smith", courtId: null });
+  });
+
+  it("strips a leading 'In re' so a bankruptcy caption matches CL's bare debtor name", () => {
+    expect(
+      validateCaseHint({
+        caption: "In re Rollcage Technology, Inc.",
+        courtId: "ctb",
+      }),
+    ).toEqual({ caption: "Rollcage Technology, Inc.", courtId: "ctb" });
+    // colon variant
+    expect(validateCaseHint({ caption: "In re: Purdue Pharma L.P." })).toEqual({
+      caption: "Purdue Pharma L.P.",
+      courtId: null,
+    });
+    // "re" mid-caption (not a leading "In re") is untouched
+    expect(validateCaseHint({ caption: "Doe v. In-Re Holdings" })).toEqual({
+      caption: "Doe v. In-Re Holdings",
+      courtId: null,
+    });
   });
 });

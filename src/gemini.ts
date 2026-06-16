@@ -96,7 +96,7 @@ export class GeminiClient {
       "You may read these web pages for facts the posts omit (e.g. the named parties of the lawsuit):",
       ...urls.map((u) => `- ${u}`),
       "",
-      'Respond with ONLY a JSON object, no prose and no code fence: {"caption": "Plaintiff v. Defendant" or null, "courtId": "<id>" or null}.',
+      'Respond with ONLY a JSON object, no prose and no code fence: {"caption": "Plaintiff v. Defendant" (or, for a bankruptcy / single-party / in re matter with no opposing party, the debtor or subject name alone with no "v.") or null, "courtId": "<id>" or null}.',
     ].join("\n");
     try {
       const res = await this.fetchImpl(url, {
