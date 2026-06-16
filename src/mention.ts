@@ -3,6 +3,8 @@
 // v1 accepts a CL docket URL or a bare CL docket id only — case-name search is
 // deliberately out of scope (it needs CL's search API + disambiguation).
 
+import { COURT_LABELS } from "./courts.js";
+
 // CL internal docket ids are 7-9 digits. Reject values outside the plausible
 // range — a non-positive id, or one >= 1e10 (a unix-ms timestamp or other
 // garbage that would burn ~17 CL calls on a guaranteed 404).
@@ -67,6 +69,91 @@ const CASE_NUMBER = /\b(\d{1,2}:\d{2}-[a-z]{2,3}-\d{3,6})\b/i;
 export function parseCaseNumber(text: string): string | null {
   const m = text.match(CASE_NUMBER);
   return m?.[1] ? m[1].toLowerCase() : null;
+}
+
+// Split free text (or a Bluebook label) into lowercase alphanumeric tokens.
+// Used by both sides of the court reverse-lookup so "Bankr. D. Conn." and a
+// label normalize identically — every "." / space / the lone U+2019 apostrophe
+// in "Op. Att'y Gen." is a token separator.
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+// Each court id paired with its tokenized Bluebook label, computed once. Single-
+// token labels (e.g. "BIA", "OLC") are dropped: a lone common word would false-
+// match prose and waste a CL search, and every district/bankruptcy designation
+// is ≥2 tokens, so coverage is unaffected.
+const COURT_TOKENS: ReadonlyArray<readonly [string, readonly string[]]> =
+  Object.entries(COURT_LABELS)
+    .map(([id, label]) => [id, tokenize(label)] as const)
+    .filter(([, toks]) => toks.length >= 2);
+
+// True when `needle` appears as a contiguous run inside `hay`.
+function containsRun(
+  hay: readonly string[],
+  needle: readonly string[],
+): boolean {
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (hay[i + j] !== needle[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+// Resolve a CourtListener court id from a free-text court designation by reverse-
+// matching the Bluebook labels in COURT_LABELS. A label matches when its token
+// run appears contiguously in the text; the LONGEST matching label wins, so
+// "Bankr. D. Conn." resolves to ctb, not the ctd substring "D. Conn.". Null when
+// no ≥2-token label matches. A miss is low-risk: parseCourt only guards/scopes a
+// docket-number search (count≠1 → suggest), never a wrong provision.
+export function parseCourt(text: string): string | null {
+  const toks = tokenize(text);
+  let bestId: string | null = null;
+  let bestLen = 0;
+  for (const [id, labelToks] of COURT_TOKENS) {
+    if (labelToks.length > bestLen && containsRun(toks, labelToks)) {
+      bestId = id;
+      bestLen = labelToks.length;
+    }
+  }
+  return bestId;
+}
+
+// A bankruptcy/adversary case number: `<2-digit-year>-<4-5-digit seq>`, e.g.
+// "22-20743", "22-02014". Any trailing judge/division suffix (…-jjt) falls
+// outside the \b-bounded capture. Unlike the district format it has no self-
+// validating structure, so a bare match is trusted ONLY alongside a parseable
+// court — see parseCaseRef.
+const BK_NUMBER = /\b(\d{2}-\d{4,5})\b/;
+
+// The precise docket-request signal: a case number plus, where needed, the court
+// that scopes the CourtListener search.
+//   - District/appellate numbers ("3:26-cv-05763") are globally near-unique and
+//     pass through UNSCOPED (courtId null) — byte-identical to the prior path.
+//   - Bankruptcy numbers ("22-20743") collide across courts, so they resolve only
+//     when a court is also named; that court both guards against false positives
+//     (dates, page ranges, stray "NN-NNNNN" runs) and scopes the search to one.
+// Null when no usable case reference is present (caller falls through to Gemini).
+export function parseCaseRef(
+  text: string,
+): { caseNumber: string; courtId: string | null } | null {
+  const district = parseCaseNumber(text);
+  if (district) return { caseNumber: district, courtId: null };
+  const bk = text.match(BK_NUMBER);
+  if (bk?.[1]) {
+    const courtId = parseCourt(text);
+    if (courtId) return { caseNumber: bk[1], courtId };
+  }
+  return null;
 }
 
 // Free mention text (e.g. "@ape.rcape.org please add

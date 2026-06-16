@@ -1217,11 +1217,44 @@ describe("prose inference (v1b)", () => {
     try {
       expect(searchByDocketNumber).toHaveBeenCalledWith(
         "0:26-cr-00115",
+        null, // district number is self-unique → unscoped search
         expect.any(String),
       );
       expect(inferCase).not.toHaveBeenCalled(); // case number wins; Gemini skipped
       expect(r.replies).toHaveLength(2); // ack + provisioned
       expect(r.replies[0]?.text).toContain("69777799");
+      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("resolves a bankruptcy citation by court-scoped docket-number search", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const searchByDocketNumber = vi.fn(async () => oneMatch);
+    const r = await run({
+      mention: {
+        uri: "m-bk",
+        cid: "cb",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "@ape.rcape.org Rollcage Technology, Inc., 22-20743, (Bankr. D. Conn.)",
+        root: { uri: "m-root", cid: "cr" },
+      },
+      thread: null,
+      inferCase,
+      searchDockets: vi.fn(async () => null),
+      searchByDocketNumber,
+    });
+    try {
+      // BK numbers collide across courts → the parsed court (ctb) scopes the search.
+      expect(searchByDocketNumber).toHaveBeenCalledWith(
+        "22-20743",
+        "ctb",
+        expect.any(String),
+      );
+      expect(inferCase).not.toHaveBeenCalled(); // precise number+court wins; Gemini skipped
+      expect(r.replies).toHaveLength(2); // ack + provisioned
       expect(r.queue.jobs[0]?.docketId).toBe(69777799);
     } finally {
       await r.cleanup();

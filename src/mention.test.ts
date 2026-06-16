@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   parseCaseNumber,
+  parseCaseRef,
+  parseCourt,
   parseDocketId,
   parseDocketLink,
   parseMention,
@@ -27,6 +29,70 @@ describe("parseCaseNumber", () => {
     expect(parseCaseNumber("@ape please add the Anthropic case")).toBeNull();
     // a bare CL docket id is NOT a case number
     expect(parseCaseNumber("docket 73482575")).toBeNull();
+  });
+});
+
+describe("parseCourt", () => {
+  it("resolves a bankruptcy court from its Bluebook abbreviation", () => {
+    expect(
+      parseCourt("Rollcage Technology, Inc., 22-20743, (Bankr. D. Conn.)"),
+    ).toBe("ctb");
+  });
+
+  it("prefers the longest (most specific) matching label", () => {
+    // "Bankr. D. Conn." contains "D. Conn." as a token run; the longer label wins.
+    expect(parseCourt("(Bankr. D. Conn.)")).toBe("ctb");
+    expect(parseCourt("filed in D. Conn.")).toBe("ctd");
+  });
+
+  it("resolves a district court written with dotted initials", () => {
+    expect(parseCourt("a case in S.D.N.Y. today")).toBe("nysd");
+  });
+
+  it("returns null when no court is named", () => {
+    expect(parseCourt("@ape please add this one")).toBeNull();
+  });
+
+  it("ignores single-token labels so prose words can't false-match a court", () => {
+    // "bia" is a single-token label (BIA); a bare word must not resolve a court.
+    expect(parseCourt("the bia ruling was wild")).toBeNull();
+  });
+});
+
+describe("parseCaseRef", () => {
+  it("parses a bankruptcy citation into number + court", () => {
+    expect(
+      parseCaseRef("Rollcage Technology, Inc., 22-20743, (Bankr. D. Conn.)"),
+    ).toEqual({ caseNumber: "22-20743", courtId: "ctb" });
+  });
+
+  it("passes a district case number through unscoped (courtId null)", () => {
+    expect(parseCaseRef("can you pull 3:26-cv-05763")).toEqual({
+      caseNumber: "3:26-cv-05763",
+      courtId: null,
+    });
+  });
+
+  it("rejects a bare bankruptcy-shaped number with no court (false-positive guard)", () => {
+    expect(parseCaseRef("the 22-20743 thing")).toBeNull();
+  });
+
+  it("strips a trailing judge/division suffix on a bankruptcy number", () => {
+    expect(parseCaseRef("22-20743-jjt in Bankr. D. Conn.")).toEqual({
+      caseNumber: "22-20743",
+      courtId: "ctb",
+    });
+  });
+
+  it("matches an adversary-proceeding number with a court", () => {
+    expect(parseCaseRef("adv. 22-02014, Bankr. D. Conn.")).toEqual({
+      caseNumber: "22-02014",
+      courtId: "ctb",
+    });
+  });
+
+  it("returns null when there is neither a case number nor a court", () => {
+    expect(parseCaseRef("@ape please add the Anthropic case")).toBeNull();
   });
 });
 

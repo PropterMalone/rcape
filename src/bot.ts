@@ -21,7 +21,7 @@ import {
   mutateLedger,
   selectToken,
 } from "./ledger.js";
-import { parseCaseNumber, parseMention } from "./mention.js";
+import { parseCaseRef, parseMention } from "./mention.js";
 import {
   type ProvisionConfig,
   type ProvisionResult,
@@ -159,6 +159,7 @@ export interface BotDeps {
   // key. Returns null on any failure (degrade to the no-docket reply).
   searchByDocketNumber?: (
     caseNumber: string,
+    courtId: string | null,
     token: string,
   ) => Promise<ClSearchPage | null>;
 }
@@ -372,23 +373,26 @@ async function classifyMention(
   // we do NOT fall through to Gemini, whose caption guess can't beat an exact
   // number. Charge the search call before issuing it (crash-safe direction).
   if ("kind" in parsed && allowed && deps.searchByDocketNumber) {
-    const caseNumber = parseCaseNumber(m.text);
-    if (caseNumber) {
+    const ref = parseCaseRef(m.text);
+    if (ref) {
       const before = await loadLedger(deps.cfg.ledgerPath);
       const token = selectToken(before, deps.cfg.tokens, today(), 1);
       if (token) {
         await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
           chargeQuota(fresh, 1, today(), token),
         );
+        // courtId scopes bankruptcy numbers (which collide across courts) to one
+        // docket; it's null for the self-unique district format, leaving that
+        // search byte-identical to before.
         const res = await deps
-          .searchByDocketNumber(caseNumber, token)
+          .searchByDocketNumber(ref.caseNumber, ref.courtId, token)
           .catch(() => null);
         if (res && res.count === 1 && res.results[0]) {
           parsed = { docketId: res.results[0].docket_id };
         } else if (res) {
           return {
             kind: "reply-suggest",
-            caption: caseNumber,
+            caption: ref.caseNumber,
             matches: res.count,
           };
         }
@@ -643,10 +647,11 @@ async function main(): Promise<void> {
     ownerDid,
     // Always wired (no Gemini needed): a fresh client per call (no throttle
     // interleaving with a concurrent provision client / no 13s pre-wait).
-    searchByDocketNumber: async (caseNumber, token) => {
+    searchByDocketNumber: async (caseNumber, courtId, token) => {
       try {
         return await new CourtListenerClient(token).searchByDocketNumber(
           caseNumber,
+          courtId ?? undefined,
         );
       } catch (e) {
         console.error(
