@@ -69,6 +69,11 @@ const PER_REQUESTER_CAP = 3;
 // after MAX_PROVISION_RETRIES attempts the job is failed and the requester gets
 // an apologetic reply. Backoff grows with the attempt count so a flapping PDS or
 // CL hiccup is given time to recover without head-of-line blocking the queue.
+// Matches the owner's launch-announcement post so the bot acknowledges it with a
+// bare "Ook." rather than the no-docket nudge. Owner-gated at the call site;
+// tolerant of "R.C. Ape" / "RC Ape" punctuation+spacing.
+const ANNOUNCEMENT_MARKER = /announcing\s+r\.?\s*c\.?\s*ape/i;
+
 const MAX_PROVISION_RETRIES = 3;
 const RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
 
@@ -189,6 +194,21 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
   for (const m of mentions) {
     if (m.authorDid === deps.agent.did) continue; // never reply to self (loop guard)
     if (hasSeen(queue, m.uri)) continue;
+
+    // Launch-announcement easter egg: the owner's "Announcing R.C. Ape…" post
+    // @-mentions the bot but carries no docket — reply with a clean "Ook."
+    // instead of the no-docket nudge. Gated on owner-authored AND the marker, so
+    // it never fires for anyone else or for any real request.
+    if (
+      deps.ownerDid &&
+      m.authorDid === deps.ownerDid &&
+      ANNOUNCEMENT_MARKER.test(m.text)
+    ) {
+      await deps.agent.reply({ uri: m.uri, cid: m.cid }, m.root, "Ook.");
+      queue = markSeen(queue, m.uri);
+      await persistQueue(deps.queuePath, queue);
+      continue;
+    }
 
     const action = await classifyMention(m, deps, queue);
     const parent: StrongRef = { uri: m.uri, cid: m.cid };

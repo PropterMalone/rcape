@@ -906,6 +906,77 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  it("acks the owner's launch announcement with a bare 'Ook.' (no docket nudge)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const announce: MentionNotif = {
+        uri: "m-announce",
+        cid: "ca",
+        authorDid: "did:owner",
+        authorHandle: "proptermalone.bsky.social",
+        text: "Announcing R.C. Ape (@ape.rcape.org): an atproto librarian for federal court dockets.",
+        root: { uri: "m-announce", cid: "ca" },
+        source: "mention",
+      };
+      const { agent, replies } = mockAgent([announce], null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        ownerDid: "did:owner",
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      expect(replies).toHaveLength(1);
+      expect(replies[0]?.text).toBe("Ook.");
+      expect((await loadQueue(queuePath)).jobs).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT fire the announcement ack for a non-owner posting the same text", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const impostor: MentionNotif = {
+        uri: "m-imp",
+        cid: "ci",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "Announcing R.C. Ape — look at this cool bot @ape.rcape.org",
+        root: { uri: "m-imp", cid: "ci" },
+        source: "mention",
+      };
+      const { agent, replies } = mockAgent([impostor], null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        ownerDid: "did:owner",
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      // alice is allowlisted but not the owner → normal no-docket path, not "Ook."
+      expect(replies[0]?.text).not.toBe("Ook.");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("provisions when a docket link is handed back as a reply to the bot", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
