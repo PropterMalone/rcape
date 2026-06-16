@@ -184,6 +184,18 @@ export function markRetrying(
   });
 }
 
+// Reschedule a job whose provision hit CourtListener's rate window (not a fault):
+// set status=retrying + nextAttemptAt WITHOUT bumping retryCount, so a closed
+// window never counts toward the transient-failure cap. drain skips it until the
+// window is due to reopen.
+export function markThrottled(
+  q: QueueState,
+  docketId: number,
+  nextAttemptAt: string,
+): QueueState {
+  return patchJob(q, docketId, { status: "retrying", nextAttemptAt });
+}
+
 export function hasSeen(q: QueueState, uri: string): boolean {
   return q.seen.has(uri);
 }

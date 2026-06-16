@@ -778,6 +778,120 @@ describe("drain branches", () => {
   });
 });
 
+describe("rate-limit throttling", () => {
+  const aliceDocketB = (): MentionNotif => ({
+    uri: "m-alice-b",
+    cid: "cb",
+    authorDid: "did:alice",
+    authorHandle: "alice.test",
+    text: "@ape.rcape.org add https://www.courtlistener.com/docket/71795960/y/",
+    root: { uri: "m-alice-b", cid: "cb" },
+  });
+
+  it("a throttled provision stops drain, reschedules without a fault, and notifies EVERY waiting requester", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention(), aliceDocketB()]);
+
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return { status: "throttled", retryAfterMs: 5_000 };
+        },
+      };
+
+      await pollOnce(deps);
+
+      // Drain stopped on the first throttled provision — the second job was never
+      // attempted (no head-of-line crawl through the rate window).
+      expect(attempts).toBe(1);
+
+      const q = await loadQueue(queuePath);
+      const jobA = q.jobs.find((j) => j.docketId === 69777799);
+      const jobB = q.jobs.find((j) => j.docketId === 71795960);
+      // The throttled job is rescheduled (retrying + future nextAttemptAt) but its
+      // retryCount is untouched — a closed window is not a fault.
+      expect(jobA?.status).toBe("retrying");
+      expect(jobA?.retryCount).toBeUndefined();
+      expect(Date.parse(jobA?.nextAttemptAt ?? "")).toBeGreaterThan(Date.now());
+      // The job behind it stays queued — but is told, not left silent.
+      expect(jobB?.status).toBe("queued");
+
+      // EVERY waiting requester gets exactly one "rate limit / hang tight" notice,
+      // honest about timing (not the daily "tomorrow"), and nobody gets a failure.
+      const rateReplies = replies.filter((r) =>
+        r.text.toLowerCase().includes("rate limit"),
+      );
+      expect(rateReplies).toHaveLength(2);
+      expect(rateReplies.some((r) => r.text.includes("69777799"))).toBe(true);
+      expect(rateReplies.some((r) => r.text.includes("71795960"))).toBe(true);
+      expect(rateReplies.some((r) => r.text.includes("tomorrow"))).toBe(false);
+      expect(replies.some((r) => r.text.includes("couldn't shelve"))).toBe(
+        false,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a throttled job retries on a later cycle and completes — no retry-count cost", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          // Throttled first; the window reopens and the retry succeeds.
+          return attempts === 1
+            ? { status: "throttled", retryAfterMs: 5_000 }
+            : provisionStub();
+        },
+      };
+
+      await pollOnce(deps); // throttled → retrying
+      let q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("retrying");
+      expect(q.jobs[0]?.retryCount).toBeUndefined();
+
+      // A poll before the rescheduled time must not re-attempt.
+      await pollOnce(deps);
+      expect(attempts).toBe(1);
+
+      // After the window reopens, the retry runs and completes.
+      vi.advanceTimersByTime(6_000);
+      await pollOnce(deps);
+      expect(attempts).toBe(2);
+      q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("done");
+      expect(q.jobs[0]?.retryCount).toBeUndefined(); // never counted as a failure
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("thread-scan (v1a)", () => {
   // The mention names no docket; the post it replies to links one. The bot must
   // resolve it from the thread and provision exactly as if the link were pasted.

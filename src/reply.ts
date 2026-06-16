@@ -40,6 +40,10 @@ export type ReplyKind =
   // mid-shelving doesn't leave the requester waiting on a "shelved" reply that
   // won't come until the next day's reset.
   | { kind: "deferred"; docketId: number }
+  // Posted once when CourtListener's hourly rate window is closed mid-shelving —
+  // distinct from `deferred` (daily cap): the hourly window reopens within the
+  // day, so this promises "soon", not "tomorrow".
+  | { kind: "throttled"; docketId: number }
   // Posted only after retries are exhausted, so the requester isn't left in
   // permanent silence after the ack.
   | { kind: "failed"; docketId: number };
@@ -98,6 +102,9 @@ export function buildReply(r: ReplyKind): string {
       break;
     case "deferred":
       text = `Ook. I've reached today's CourtListener limit — docket ${r.docketId} is shelved in the queue and I'll finish it tomorrow.`;
+      break;
+    case "throttled":
+      text = `Ook. CourtListener's stacks are busy (rate limit) — docket ${r.docketId} is in the queue and I'll shelve it as soon as the limit clears. Hang tight.`;
       break;
     case "failed":
       text = `Ook. I couldn't shelve docket ${r.docketId} — the stacks gave way after a few tries. Mention me again later and I'll have another go.`;

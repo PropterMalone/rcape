@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MappedCase } from "./build.js";
 import type { CaseRepo } from "./caseRepo.js";
-import type { CourtListenerClient } from "./courtlistener.js";
+import { type CourtListenerClient, ThrottledError } from "./courtlistener.js";
 import {
   type CaseEntry,
   emptyLedger,
@@ -80,6 +80,24 @@ describe("runProvision incremental quota", () => {
     expect(ledger.quota.counts[tokenId("t")] ?? 0).toBeGreaterThanOrEqual(
       SPENT,
     );
+  });
+
+  it("classifies a mid-fetch ThrottledError as throttled (not a fault) and reconciles spend", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(ledgerPath, emptyLedger());
+
+    const SPENT = 7; // calls made before the hourly window closed
+    const result = await runProvision(123, cfg(ledgerPath), {
+      makeClient: () => clientWithCount(SPENT),
+      mapCase: async () => {
+        throw new ThrottledError(800_000);
+      },
+    });
+    expect(result).toEqual({ status: "throttled", retryAfterMs: 800_000 });
+
+    // The reservation reconciled to the real spend — no quota leak on a throttle.
+    const ledger = await loadLedger(ledgerPath);
+    expect(ledger.quota.counts[tokenId("t")] ?? 0).toBe(SPENT);
   });
 
   it("reconciles down to the real call count on a successful fetch", async () => {

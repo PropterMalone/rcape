@@ -21,6 +21,7 @@ const all: ReplyKind[] = [
   { kind: "suggest", caption: "United States v. Smith", matches: 0 },
   { kind: "suggest", caption: "United States v. Smith", matches: 4 },
   { kind: "deferred", docketId: 69777799 },
+  { kind: "throttled", docketId: 69777799 },
   { kind: "failed", docketId: 69777799 },
 ];
 
@@ -74,6 +75,15 @@ describe("buildReply", () => {
     });
     expect(partial).toContain("3");
     expect(graphemes(partial)).toBeLessThanOrEqual(300);
+  });
+
+  it("distinguishes the hourly throttle (soon) from the daily defer (tomorrow)", () => {
+    const throttled = buildReply({ kind: "throttled", docketId: 69777799 });
+    expect(throttled).toContain("69777799");
+    expect(throttled.toLowerCase()).toContain("rate limit");
+    expect(throttled).not.toContain("tomorrow");
+    const deferred = buildReply({ kind: "deferred", docketId: 69777799 });
+    expect(deferred).toContain("tomorrow");
   });
 
   it("references the docket id in the ack (case name not yet known)", () => {

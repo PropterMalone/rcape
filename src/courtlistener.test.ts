@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
+import {
+  CourtListenerClient,
+  ThrottledError,
+  parseClTokens,
+} from "./courtlistener.js";
 
 function res(status: number, body: unknown): Response {
   return {
@@ -53,6 +57,52 @@ describe("CourtListenerClient pagination SSRF guard", () => {
     );
     const out = await client.getAllDocketEntries(123);
     expect(out).toHaveLength(2);
+  });
+});
+
+describe("429 handling", () => {
+  it("throws ThrottledError without sleeping when the cooldown exceeds the cap", async () => {
+    // The hourly/daily window: an 800s cooldown would freeze the drain loop. It
+    // must surface as a typed error instead, fast, with the request made once.
+    const fetchImpl = vi.fn(async () =>
+      res(429, {
+        detail:
+          "Request was throttled. Rate limit exceeded: 50/hour. Expected available in 800 seconds.",
+      }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const err = await client.getDocket(1).catch((e) => e);
+    expect(err).toBeInstanceOf(ThrottledError);
+    expect((err as ThrottledError).retryAfterMs).toBe(802_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("sleeps through and retries a short (sub-cap) 429, then succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const fetchImpl = vi.fn(async () => {
+        n += 1;
+        return n === 1
+          ? res(429, { detail: "throttled. Expected available in 5 seconds." })
+          : res(200, { id: 1 });
+      });
+      const client = new CourtListenerClient(
+        "t",
+        fetchImpl as unknown as typeof fetch,
+        0,
+      );
+      const p = client.getDocket(1);
+      await vi.advanceTimersByTimeAsync(7_000); // (5 + 2)s cooldown
+      await expect(p).resolves.toEqual({ id: 1 });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

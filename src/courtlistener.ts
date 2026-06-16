@@ -36,8 +36,27 @@ const BASE = "https://www.courtlistener.com/api/rest/v4";
 const CL_ORIGIN = new URL(BASE).origin; // https://www.courtlistener.com
 const MAX_PAGES = 50;
 
+// Longest a single 429 cooldown we'll sleep through inline. A brief 5/min blip
+// (a few seconds) is worth waiting out; the hourly/daily window (hundreds to
+// thousands of seconds) is not — sleeping it would freeze the bot's single drain
+// loop for many minutes (head-of-line blocking the whole queue). Past this cap we
+// throw ThrottledError so the caller can defer the case and free the queue.
+const MAX_429_WAIT_MS = 90_000;
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+// A CourtListener 429 whose cooldown is too long to sleep through inline. Carries
+// the server-reported wait so the caller can schedule a retry near the window's
+// reopening instead of hammering.
+export class ThrottledError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super(
+      `CourtListener rate-limited; retry after ~${Math.round(retryAfterMs / 1000)}s`,
+    );
+    this.name = "ThrottledError";
+  }
+}
 
 export class CourtListenerClient {
   private lastRequestAt = 0;
@@ -93,6 +112,9 @@ export class CourtListenerClient {
         const body = await res.text();
         const m = body.match(/available in (\d+) seconds/);
         const cooldownMs = (m ? Number(m[1]) + 2 : 15) * 1000;
+        // A long cooldown is the hourly/daily window — don't block the drain loop
+        // for it; surface it so the case is deferred and the queue moves on.
+        if (cooldownMs > MAX_429_WAIT_MS) throw new ThrottledError(cooldownMs);
         await sleep(cooldownMs);
         continue;
       }

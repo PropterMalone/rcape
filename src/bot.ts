@@ -41,6 +41,7 @@ import {
   markFailed,
   markRetrying,
   markSeen,
+  markThrottled,
   mutateQueue,
   nextDrainable,
   perRequesterQueued,
@@ -61,6 +62,11 @@ import {
 // the race between this check and runProvision's reservation charge. Drain
 // re-checks before each job.
 const MIN_QUOTA_FOR_CASE = 20;
+// Cap on how far out a rate-throttled job is rescheduled. CourtListener reports
+// the cooldown ("available in N seconds"); we honor it but clamp to 1h so a
+// pathological value can't park a job indefinitely. The hourly window's real
+// cooldown is well under this, so a throttled case retries near its reopening.
+const MAX_THROTTLE_BACKOFF_MS = 3_600_000;
 // Max in-flight (queued/retrying) requests per requester. Bounds how much of the
 // shared daily budget any single allowlisted account can reserve at once (3 ×
 // ~17 = ~51 calls), so one user can't monopolize the queue or the quota.
@@ -462,24 +468,29 @@ async function classifyMention(
   });
 }
 
-// Post the one-time "I've hit today's CL limit; I'll finish tomorrow" reply for a
-// job the daily budget deferred, and persist the dedupe flag. No-op if already
-// sent. Returns the (possibly updated) queue. The job stays queued either way —
-// the deferral is purely a notice; next day's drain resumes it.
-async function notifyDeferred(
+// When the drain stalls on a budget/rate limit, tell EVERY waiting requester once
+// — not just the head job. A single throttled or budget-exhausted poll means none
+// of the active (queued/retrying) cases will shelve this cycle, so each acked
+// requester gets one notice (`deferredNotified` dedupes across cycles) rather than
+// silence behind the head. `kind` picks the honest timing: "deferred" (daily cap,
+// resumes tomorrow) vs "throttled" (hourly window, reopens soon).
+async function notifyAllDeferred(
   deps: BotDeps,
   queue: QueueState,
-  job: Job,
+  kind: "deferred" | "throttled",
 ): Promise<QueueState> {
-  if (job.deferredNotified) return queue;
-  const next = markDeferredNotified(queue, job.docketId);
-  await persistQueue(deps.queuePath, next);
-  await deps.agent.reply(
-    job.ackRef ?? job.mention,
-    job.rootRef,
-    buildReply({ kind: "deferred", docketId: job.docketId }),
-  );
-  return next;
+  let q = queue;
+  for (const job of q.jobs) {
+    if (!isActive(job) || job.deferredNotified) continue;
+    q = markDeferredNotified(q, job.docketId);
+    await persistQueue(deps.queuePath, q);
+    await deps.agent.reply(
+      job.ackRef ?? job.mention,
+      job.rootRef,
+      buildReply({ kind, docketId: job.docketId }),
+    );
+  }
+  return q;
 }
 
 async function drain(
@@ -513,7 +524,7 @@ async function drain(
     // automatically — no new request needed. Tell the requester once that their
     // acked case is paused until tomorrow (the flag dedupes across cycles).
     if (!selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE)) {
-      queue = await notifyDeferred(deps, queue, job);
+      queue = await notifyAllDeferred(deps, queue, "deferred");
       break;
     }
 
@@ -545,11 +556,23 @@ async function drain(
       } else {
         queue = markFailed(queue, job.docketId);
       }
+    } else if (result.status === "throttled") {
+      // CourtListener's rate window closed mid-fetch. Not a fault: reschedule near
+      // its reopening WITHOUT bumping retryCount (a closed window must not count
+      // toward the failure cap), tell everyone waiting once, and stop this cycle.
+      // The next 60s poll retries once the window is due to reopen.
+      const nextAt = new Date(
+        Date.now() + Math.min(result.retryAfterMs, MAX_THROTTLE_BACKOFF_MS),
+      ).toISOString();
+      queue = markThrottled(queue, job.docketId, nextAt);
+      await persistQueue(deps.queuePath, queue);
+      queue = await notifyAllDeferred(deps, queue, "throttled");
+      break;
     } else {
       // quota-exhausted mid-provision (a large docket's entry pagination outran
       // the reservation): leave the job queued — the next day's drain resumes it
-      // automatically. Notify the requester once that it'll finish tomorrow.
-      queue = await notifyDeferred(deps, queue, job);
+      // automatically. Notify everyone waiting once that it'll finish tomorrow.
+      queue = await notifyAllDeferred(deps, queue, "deferred");
       break;
     }
     await persistQueue(deps.queuePath, queue);
