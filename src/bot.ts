@@ -42,6 +42,7 @@ import {
   markRetrying,
   markSeen,
   markThrottled,
+  markThrottledNotified,
   mutateQueue,
   nextDrainable,
   perRequesterQueued,
@@ -483,8 +484,16 @@ async function notifyAllDeferred(
 ): Promise<QueueState> {
   let q = queue;
   for (const job of q.jobs) {
-    if (!isActive(job) || job.deferredNotified) continue;
-    q = markDeferredNotified(q, job.docketId);
+    if (!isActive(job)) continue;
+    // Per-kind dedupe: a throttled ("soon") notice must not suppress a later
+    // daily-deferred ("tomorrow") notice — they carry different, updated timing.
+    const alreadyNotified =
+      kind === "throttled" ? job.throttledNotified : job.deferredNotified;
+    if (alreadyNotified) continue;
+    q =
+      kind === "throttled"
+        ? markThrottledNotified(q, job.docketId)
+        : markDeferredNotified(q, job.docketId);
     await persistQueue(deps.queuePath, q);
     await deps.agent.reply(
       job.ackRef ?? job.mention,

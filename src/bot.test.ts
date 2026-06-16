@@ -843,6 +843,54 @@ describe("rate-limit throttling", () => {
     }
   });
 
+  it("a throttle notice does NOT suppress a later daily-deferred notice (separate flags)", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      const day = new Date().toISOString().slice(0, 10);
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => ({
+          status: "throttled",
+          retryAfterMs: 5_000,
+        }),
+      };
+
+      // Cycle 1 (budget free): hourly throttle → "hang tight".
+      await pollOnce(deps);
+      expect(
+        replies.some((r) => r.text.toLowerCase().includes("rate limit")),
+      ).toBe(true);
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        false,
+      );
+
+      // Now the daily cap is hit and the throttle backoff elapses.
+      await saveLedger(ledgerPath, chargeQuota(emptyLedger(), 120, day, "t"));
+      vi.advanceTimersByTime(6_000);
+
+      // Cycle 2: the budget gate fires → the "tomorrow" notice MUST still post,
+      // even though the throttle notice already did (the bug: one shared flag).
+      await pollOnce(deps);
+      const tomorrow = replies.filter((r) =>
+        r.text.includes("finish it tomorrow"),
+      );
+      expect(tomorrow).toHaveLength(1);
+      expect(tomorrow[0]?.text).toContain("69777799");
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a throttled job retries on a later cycle and completes — no retry-count cost", async () => {
     vi.useFakeTimers();
     const { pollOnce } = await import("./bot.js");

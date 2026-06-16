@@ -28,9 +28,14 @@ export interface Job {
   createdAt: string;
   retryCount?: number; // transient-failure attempts so far (drives backoff + cap)
   nextAttemptAt?: string; // ISO time the retrying job becomes drainable again
-  // true once the quota-deferred "I'll finish tomorrow" reply was posted, so it
-  // isn't re-posted every poll cycle the job sits queued awaiting the daily reset.
+  // true once the daily-cap "I'll finish tomorrow" reply was posted, so it isn't
+  // re-posted every poll cycle the job sits queued awaiting the daily reset.
   deferredNotified?: boolean;
+  // true once the hourly-throttle "rate limit, hang tight" reply was posted.
+  // SEPARATE from deferredNotified: a job can be throttled (hourly, "soon") and
+  // later daily-deferred ("tomorrow") — both notices must be able to fire, so one
+  // flag can't gate both or the second, more-accurate notice is suppressed.
+  throttledNotified?: boolean;
 }
 
 export interface QueueState {
@@ -163,6 +168,15 @@ export function markDeferredNotified(
   docketId: number,
 ): QueueState {
   return patchJob(q, docketId, { deferredNotified: true });
+}
+
+// Dedupe flag for the hourly-throttle notice — independent of deferredNotified so
+// a throttled-then-daily-deferred job still gets the "tomorrow" reply.
+export function markThrottledNotified(
+  q: QueueState,
+  docketId: number,
+): QueueState {
+  return patchJob(q, docketId, { throttledNotified: true });
 }
 
 // Back a transiently-failed job off: bump retryCount and set nextAttemptAt so
