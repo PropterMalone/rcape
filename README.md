@@ -59,7 +59,10 @@ npm run takedown -- --entry <rkey> --reason "<basis>"   # remove a filing + its 
 
 The **R.C. Ape** by-request bot is shipped: mention [@ape.rcape.org](https://bsky.app/profile/ape.rcape.org) with a CourtListener docket (a link or its id) and it provisions a per-case repo, replying when the case is shelved. Requests are admitted from accounts [@proptermalone](https://bsky.app/profile/proptermalone.bsky.social) follows or who follow them, and drained under the shared CourtListener daily budget.
 
-Next: a watched-case auto-monitor (polls provisioned cases for new filings, appends them, and honors upstream seals).
+Roadmap:
+
+- **Watched-case auto-monitor** — polls provisioned cases for new filings, appends them, and honors upstream seals.
+- **Late-document backfill** — when an entry is shelved before its document is captured in RECAP (no `filepath_local`, so the companion post links to the CL docket page rather than a PDF), re-capture the document once RECAP has it. The new-entry monitor above won't cover this: a later document on an *already-shelved* entry doesn't advance the case's `highWater`, so a distinct re-scan is needed. Enabler: stamp entries shelved without a document (or with `is_available: false`) as "pending capture" so the re-scan knows which to revisit. Until then, the post's link to the live CL docket page self-heals for human readers.
 
 ## Disclaimer
 
