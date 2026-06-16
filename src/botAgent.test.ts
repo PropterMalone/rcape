@@ -81,4 +81,20 @@ describe("paginateMentions", () => {
     expect(out.map((m) => m.uri)).toEqual(["m1"]);
     expect(fetchPage).toHaveBeenCalledTimes(1);
   });
+
+  it("collects reply notifications (a link handed back in conversation) and tags source", async () => {
+    const fetchPage = vi.fn(async (): Promise<ListNotificationsPage> => {
+      return page(
+        [
+          { uri: "m1", reason: "mention" },
+          { uri: "like1", reason: "like" }, // still ignored
+          { uri: "r1", reason: "reply" },
+        ],
+        undefined,
+      );
+    });
+    const out = await paginateMentions(fetchPage, { isSeen: () => false });
+    expect(out.map((m) => m.uri)).toEqual(["m1", "r1"]);
+    expect(out.map((m) => m.source)).toEqual(["mention", "reply"]);
+  });
 });

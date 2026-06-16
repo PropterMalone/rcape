@@ -74,17 +74,18 @@ export function buildReply(r: ReplyKind): string {
       break;
     case "no-docket":
       // Acknowledge the mention (the requester knows I heard them), then ask for
-      // the missing docket — not a bare broadcast of instructions.
+      // the missing docket — not a bare broadcast of instructions. "Reply with"
+      // (not "mention me again") because a plain reply with a link now works.
       text =
-        "Ook? I hear you, but I couldn't find a docket in that. Point me at a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
+        "Ook? I hear you, but I couldn't find a docket in that. Reply with a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
       break;
     case "suggest":
       // The guessed caption shows the requester what the Librarian understood,
       // so a wrong guess is self-explanatory and the fix (a link) is obvious.
       text =
         r.matches === 0
-          ? `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Point me at a CourtListener docket link and I'll fetch it.`
-          : `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Give me the CourtListener link for yours and I'll fetch it.`;
+          ? `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Reply with the CourtListener docket link and I'll fetch it.`
+          : `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Reply with the CourtListener link for yours and I'll fetch it.`;
       break;
     case "not-found":
       text =

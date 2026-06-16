@@ -10,7 +10,7 @@ import { BOT_SELF_LABEL } from "./companionPost.js";
 import {
   type MentionFacet,
   type RichtextRecord,
-  extractLinkFacets,
+  extractPostLinks,
 } from "./facet.js";
 import type { StrongRef } from "./queue.js";
 import type { ThreadView } from "./thread.js";
@@ -26,11 +26,16 @@ export interface MentionNotif {
   authorDid: string;
   authorHandle: string;
   text: string;
-  // URIs from the post's link facets. The full URL lives here even when `text`
-  // shows a Bluesky-truncated version (".../docket/71795..."), so docket parsing
-  // must prefer these over the visible text.
+  // URIs from the post's link facets AND its external link card. The full URL
+  // lives here even when `text` shows a Bluesky-truncated version
+  // (".../docket/71795..."), so docket parsing must prefer these over the text.
   links?: string[];
   root: StrongRef; // thread root (the mention itself if it's a top-level post)
+  // How this notification reached us: an explicit @-mention (intentional
+  // request — "reply to everyone" applies) or a plain reply to one of the bot's
+  // own posts (a conversation continuation — a contentless reply like "thanks"
+  // must NOT draw a decline/no-docket nudge). Absent ⇒ treated as a mention.
+  source?: "mention" | "reply";
 }
 
 // The slice of a listNotifications response paginateMentions consumes. Kept
@@ -79,7 +84,7 @@ function toMention(n: RawNotification): MentionNotif {
     text?: string;
     reply?: { root?: { uri: string; cid: string } };
   };
-  const links = extractLinkFacets(record);
+  const links = extractPostLinks(record);
   return {
     uri: n.uri,
     cid: n.cid,
@@ -88,14 +93,21 @@ function toMention(n: RawNotification): MentionNotif {
     text: record.text ?? "",
     links,
     root: record.reply?.root ?? { uri: n.uri, cid: n.cid },
+    source: n.reason === "reply" ? "reply" : "mention",
   };
 }
 
 // pattern: Functional Core
-// Walk listNotifications cursor pages, collecting `mention` notifications, until
-// the cursor is absent or an already-seen URI is reached. A single 50-notif page
-// can be all likes/follows with real mentions scrolled off the bottom; without
-// pagination those mentions are silently dropped, violating "reply to everyone".
+// Walk listNotifications cursor pages, collecting `mention` AND `reply`
+// notifications, until the cursor is absent or an already-seen URI is reached. A
+// single 50-notif page can be all likes/follows with real mentions scrolled off
+// the bottom; without pagination those would be silently dropped, violating
+// "reply to everyone". A `reply` notification is, by definition, a reply to one
+// of the bot's OWN posts — so a user can hand the Librarian a docket link by
+// replying to its "reply with a link" prompt, without re-typing the @handle (the
+// natural move that previously fell into silence). The contentless-reply noise
+// this admits is suppressed downstream by `source`, not here.
+const COLLECTED_REASONS = new Set(["mention", "reply"]);
 const PAGE_GUARD = 50; // hard ceiling on pages so a server cursor bug can't loop forever
 export async function paginateMentions(
   fetchPage: (cursor?: string) => Promise<ListNotificationsPage>,
@@ -109,7 +121,7 @@ export async function paginateMentions(
     const data = await fetchPage(cursor);
     for (const n of data.notifications) {
       if (isSeen(n.uri)) return out; // hit the processed boundary — done
-      if (n.reason !== "mention") continue;
+      if (!COLLECTED_REASONS.has(n.reason)) continue;
       out.push(toMention(n));
     }
     cursor = data.cursor;
@@ -141,9 +153,11 @@ export async function createBotAgent(opts: {
         const { data } = await agent.app.bsky.notification.listNotifications({
           limit: 50,
           cursor,
-          // Server-side filter so non-mention notifications don't consume page
-          // slots; paginateMentions still re-checks reason defensively.
-          reasons: ["mention"],
+          // Server-side filter so likes/follows/reposts don't consume page slots;
+          // paginateMentions still re-checks reason defensively. `reply` is here
+          // so replies to the bot's own posts (a link handed back in
+          // conversation) are processed, not just explicit @-mentions.
+          reasons: ["mention", "reply"],
         });
         return {
           notifications:

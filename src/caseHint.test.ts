@@ -2,8 +2,51 @@ import { describe, expect, it } from "vitest";
 import {
   CASE_HINT_SCHEMA,
   buildCaseHintPrompt,
+  collectReadableUrls,
   validateCaseHint,
 } from "./caseHint.js";
+
+describe("collectReadableUrls", () => {
+  it("keeps http(s) article links from the mention and thread entries", () => {
+    expect(
+      collectReadableUrls(
+        ["https://on.wsj.com/x"],
+        [{ links: ["https://reuters.com/y"] }, { links: [] }],
+      ),
+    ).toEqual(["https://on.wsj.com/x", "https://reuters.com/y"]);
+  });
+
+  it("excludes CourtListener docket links (resolved directly upstream)", () => {
+    expect(
+      collectReadableUrls(
+        ["https://www.courtlistener.com/docket/73482575/kahn-v-anthropic/"],
+        [{ links: ["https://apnews.com/z"] }],
+      ),
+    ).toEqual(["https://apnews.com/z"]);
+  });
+
+  it("drops non-http schemes and dedupes, capped at 3", () => {
+    expect(
+      collectReadableUrls(
+        ["at://did:plc:x/post", "https://a.example/"],
+        [
+          { links: ["https://a.example/"] },
+          { links: ["https://b.example/", "https://c.example/"] },
+          { links: ["https://d.example/"] },
+        ],
+      ),
+    ).toEqual([
+      "https://a.example/",
+      "https://b.example/",
+      "https://c.example/",
+    ]);
+  });
+
+  it("returns [] when there are no links", () => {
+    expect(collectReadableUrls()).toEqual([]);
+    expect(collectReadableUrls([], [{ links: [] }])).toEqual([]);
+  });
+});
 
 describe("buildCaseHintPrompt", () => {
   it("embeds the valid court ids with their labels", () => {

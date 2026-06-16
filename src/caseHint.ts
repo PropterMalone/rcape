@@ -43,6 +43,34 @@ export const CASE_HINT_SCHEMA = {
 
 const clip = (s: string): string => s.slice(0, MAX_POST_CHARS);
 
+// How many article URLs to hand url_context. The model fetches each (latency +
+// free-tier quota), so a small cap bounds cost; the nearest-context-first order
+// of the inputs means the most relevant links survive the slice.
+const MAX_READABLE_URLS = 3;
+
+// URLs worth handing to Gemini's url_context tool so it can read an article a
+// vague poster comment links to. http(s) only (no at://, no javascript:);
+// CourtListener /docket/ links are EXCLUDED — those are an exact docket id that
+// parseDocketLink resolves directly upstream, never an inference input. Deduped,
+// nearest-context-first, capped.
+export function collectReadableUrls(
+  mentionLinks: readonly string[] = [],
+  entries: readonly { links?: string[] }[] = [],
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const all = [...mentionLinks, ...entries.flatMap((e) => e.links ?? [])];
+  for (const u of all) {
+    if (!/^https?:\/\//i.test(u)) continue;
+    if (/\/docket\/\d+/i.test(u)) continue;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+    if (out.length >= MAX_READABLE_URLS) break;
+  }
+  return out;
+}
+
 export function buildCaseHintPrompt(
   mentionText: string,
   entries: { text: string }[],

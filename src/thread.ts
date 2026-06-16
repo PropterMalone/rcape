@@ -6,7 +6,11 @@
 // isn't addressed to the bot, and a wrong guess burns ~17 CL calls — weak/prose
 // signals are v1b's job, behind a confidence gate.
 
-import { type RichtextRecord, extractLinkFacets } from "./facet.js";
+import {
+  type RichtextRecord,
+  extractPostLinks,
+  postTextWithCard,
+} from "./facet.js";
 import { parseDocketLink } from "./mention.js";
 
 // Client-side belt to getPostThread's parentHeight: cap how far up we walk.
@@ -45,7 +49,7 @@ function quotedRecord(embed: ThreadEmbed | undefined): PostRecord | undefined {
 type Entry = { text: string; links: string[] };
 
 function entry(record: PostRecord): Entry {
-  return { text: record.text ?? "", links: extractLinkFacets(record) };
+  return { text: postTextWithCard(record), links: extractPostLinks(record) };
 }
 
 function postEntries(post: ThreadPost): Entry[] {

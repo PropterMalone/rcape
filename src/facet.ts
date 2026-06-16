@@ -68,6 +68,15 @@ export function mentionFacets(
 // extract links identically.
 export interface RichtextRecord {
   facets?: { features?: { $type?: string; uri?: string }[] }[];
+  // A post's single embed, in RECORD form (`app.bsky.embed.external` for a link
+  // card, `app.bsky.embed.record#view` etc. for quotes). News/link cards put the
+  // article URL + title + description HERE, not in a #link facet — so a shared
+  // article (a WSJ docket story, a court press release) is invisible to
+  // facet-only extraction unless we read the embed too.
+  embed?: {
+    $type?: string;
+    external?: { uri?: string; title?: string; description?: string };
+  };
 }
 export function extractLinkFacets(record: RichtextRecord): string[] {
   return (record.facets ?? [])
@@ -78,4 +87,46 @@ export function extractLinkFacets(record: RichtextRecord): string[] {
         typeof ft.uri === "string",
     )
     .map((ft) => ft.uri as string);
+}
+
+export interface ExternalEmbed {
+  uri?: string;
+  title?: string;
+  description?: string;
+}
+
+// The external link card on a post (its URL + the card's title/description), or
+// undefined when the post has no `app.bsky.embed.external`. The card title is
+// often the only place a vague poster comment ("can you pull this one?") gains
+// any case signal ("Anthropic Sued Over Limits on Its $200-a-Month AI Plans").
+export function extractExternalEmbed(
+  record: RichtextRecord,
+): ExternalEmbed | undefined {
+  const e = record.embed;
+  if (e?.$type !== "app.bsky.embed.external" || !e.external) return undefined;
+  const { uri, title, description } = e.external;
+  return { uri, title, description };
+}
+
+// All outbound URLs on a post: its #link facet URLs plus an external link-card
+// URL. The card URL is appended (deduped) so a docket link shared as a card — or
+// an article link feedable to url_context — is seen alongside facet links.
+export function extractPostLinks(record: RichtextRecord): string[] {
+  const links = extractLinkFacets(record);
+  const cardUri = extractExternalEmbed(record)?.uri;
+  if (cardUri && !links.includes(cardUri)) links.push(cardUri);
+  return links;
+}
+
+// A post's text augmented with its link-card title + description, joined for the
+// case-inference prompt. The card copy carries the headline/summary, which a
+// terse human comment omits — folding it into the entry text gives the model the
+// real signal without a separate field.
+export function postTextWithCard(
+  record: RichtextRecord & { text?: string },
+): string {
+  const card = extractExternalEmbed(record);
+  return [record.text ?? "", card?.title, card?.description]
+    .filter((s): s is string => typeof s === "string" && s.length > 0)
+    .join(" — ");
 }

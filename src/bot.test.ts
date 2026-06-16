@@ -860,6 +860,83 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  // Fix A: a plain reply to one of the bot's own posts (no re-typed @handle) is
+  // now processed — but a contentless one ("thanks") must draw silence, not a
+  // decline/no-docket nudge, while a docket link handed back must provision.
+  it("stays silent on a contentless reply to the bot (no nudge, no enqueue)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const replyMention: MentionNotif = {
+        uri: "r-alice",
+        cid: "cr",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "thanks!",
+        root: { uri: "m-root", cid: "cr" },
+        source: "reply",
+      };
+      const { agent, replies } = mockAgent([replyMention], null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      expect(replies).toHaveLength(0);
+      expect((await loadQueue(queuePath)).jobs).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("provisions when a docket link is handed back as a reply to the bot", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const replyWithLink: MentionNotif = {
+        uri: "r-alice",
+        cid: "cr",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        // Bluesky-truncated text; the full URL rides in links (Karl's exact case).
+        text: "www.courtlistener.com/docket/73482...",
+        links: [
+          "https://www.courtlistener.com/docket/73482575/kahn-v-anthropic-pbc/",
+        ],
+        root: { uri: "m-root", cid: "cr" },
+        source: "reply",
+      };
+      const { agent, replies } = mockAgent([replyWithLink], null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      // ack (carries the docket id) + provisioned (carries the @handle).
+      expect(replies).toHaveLength(2);
+      expect(replies[0]?.text).toContain("73482575");
+      expect((await loadQueue(queuePath)).jobs[0]?.docketId).toBe(73482575);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("v1b inference is NOT consulted when the thread already links a docket", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));

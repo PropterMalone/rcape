@@ -139,7 +139,8 @@ export interface BotDeps {
   // return null on any failure — never throw (a hiccup must not abort a cycle).
   inferCase?: (
     mentionText: string,
-    entries: { text: string }[],
+    entries: { text: string; links?: string[] }[],
+    mentionLinks?: string[],
   ) => Promise<CaseHint | null>;
   searchDockets?: (
     caption: string,
@@ -192,11 +193,25 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     const action = await classifyMention(m, deps, queue);
     const parent: StrongRef = { uri: m.uri, cid: m.cid };
 
+    // A plain reply (not an explicit @-mention) that yields nothing actionable —
+    // declined or no-docket — gets SILENCE, not a nudge: a "thanks" reply to the
+    // bot's "done" post must not draw "I admit only…" or "send me a link" noise.
+    // Explicit @-mentions still reply to everyone. ("skip" already posts nothing.)
+    const suppressNonActionable = m.source === "reply";
+
     if (action.kind === "reply-declined") {
-      const text = buildReply({ kind: "declined" });
-      await deps.agent.reply(parent, m.root, text, replyFacets(text, deps));
+      if (!suppressNonActionable) {
+        const text = buildReply({ kind: "declined" });
+        await deps.agent.reply(parent, m.root, text, replyFacets(text, deps));
+      }
     } else if (action.kind === "reply-no-docket") {
-      await deps.agent.reply(parent, m.root, buildReply({ kind: "no-docket" }));
+      if (!suppressNonActionable) {
+        await deps.agent.reply(
+          parent,
+          m.root,
+          buildReply({ kind: "no-docket" }),
+        );
+      }
     } else if (action.kind === "reply-suggest") {
       await deps.agent.reply(
         parent,
@@ -328,7 +343,7 @@ async function classifyMention(
   // reply: the requester is asked for a link, nothing is queued.
   if ("kind" in parsed && allowed && deps.inferCase && deps.searchDockets) {
     const hint = await deps
-      .inferCase(m.text, collectThreadPosts(thread ?? undefined))
+      .inferCase(m.text, collectThreadPosts(thread ?? undefined), m.links)
       .catch(() => null);
     if (hint) {
       const before = await loadLedger(deps.cfg.ledgerPath);

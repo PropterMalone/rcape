@@ -19,6 +19,20 @@ const quote = (text: string, links: string[] = []) => ({
   $type: "app.bsky.embed.record#view",
   record: { value: rec(text, links) },
 });
+// A post carrying an external link card (news article / docket story): the URL +
+// the card's headline live in app.bsky.embed.external, NOT in a #link facet.
+const card = (
+  text: string,
+  uri: string,
+  title?: string,
+  description?: string,
+) => ({
+  text,
+  embed: {
+    $type: "app.bsky.embed.external",
+    external: { uri, title, description },
+  },
+});
 const docket = (id: number) =>
   `https://www.courtlistener.com/docket/${id}/some-case/`;
 
@@ -130,5 +144,34 @@ describe("collectThreadPosts", () => {
       "P1",
       "P1-quote",
     ]);
+  });
+
+  it("folds an ancestor's link-card title/description into its entry text + URL", () => {
+    const thread: ThreadView = {
+      post: { record: rec("@ape can you pull this one?") },
+      parent: {
+        post: {
+          record: card(
+            "Exclusive:",
+            "https://on.wsj.com/49YL2El",
+            "Anthropic Sued Over Limits",
+            "A consumer alleges the plan was oversold.",
+          ),
+        },
+      },
+    };
+    const entries = collectThreadPosts(thread);
+    expect(entries[0]?.text).toBe(
+      "Exclusive: — Anthropic Sued Over Limits — A consumer alleges the plan was oversold.",
+    );
+    expect(entries[0]?.links).toEqual(["https://on.wsj.com/49YL2El"]);
+  });
+
+  it("finds a docket shared as a link card (URL is in the embed, not a facet)", () => {
+    const thread: ThreadView = {
+      post: { record: rec("@ape add") },
+      parent: { post: { record: card("filed", docket(69777799), "US v. X") } },
+    };
+    expect(scanThreadForDocket(thread)).toEqual({ docketId: 69777799 });
   });
 });
