@@ -1126,6 +1126,42 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  it("starts a case at 13 calls of headroom (lowered gate) instead of stranding it", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      const day = new Date().toISOString().slice(0, 10);
+      // 112/125 spent → 13 free. Under the old gate (20) this deferred; the
+      // lowered gate (12) lets the case start, recovering the daily tail.
+      await saveLedger(ledgerPath, chargeQuota(emptyLedger(), 112, day, "t"));
+      const { agent, replies } = mockAgent([aliceMention()]);
+      let provisioned = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          provisioned++;
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      expect(provisioned).toBe(1); // gate passed at 13 free
+      expect((await loadQueue(queuePath)).jobs[0]?.status).toBe("done");
+      expect(replies.some((r) => r.text.includes("@abrego-garcia"))).toBe(true);
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        false,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("provisions when a docket link is handed back as a reply to the bot", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));

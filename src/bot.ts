@@ -55,13 +55,15 @@ import {
   scanThreadForDocket,
 } from "./thread.js";
 
-// A full case fetch is ~17 CL calls (docket + entry/party pages). Require 20 —
-// headroom over RESERVED_CALLS_PER_CASE (provisionCase.ts = 17) — before STARTING
-// one, so a case can't begin, exhaust a token's shared budget partway, and strand
-// itself half-provisioned. MUST stay > RESERVED_CALLS_PER_CASE so the gap absorbs
+// Require this much free budget before STARTING a case, so one can't begin,
+// exhaust a token's shared budget partway, and strand itself half-provisioned.
+// MUST stay > RESERVED_CALLS_PER_CASE (provisionCase.ts = 10) so the gap absorbs
 // the race between this check and runProvision's reservation charge. Drain
-// re-checks before each job.
-const MIN_QUOTA_FOR_CASE = 20;
+// re-checks before each job. Lowered 20→12 (2026-06-16) alongside the reservation:
+// a typical case is ~3 REST calls (entries paginate at 100/page; doc hashing is
+// off-quota), so the old 20 stranded ~a case worth of daily headroom; the
+// graceful throttle handling backstops a rare bigger docket.
+const MIN_QUOTA_FOR_CASE = 12;
 // Cap on how far out a rate-throttled job is rescheduled. CourtListener reports
 // the cooldown ("available in N seconds"); we honor it but clamp to 1h so a
 // pathological value can't park a job indefinitely. The hourly window's real
