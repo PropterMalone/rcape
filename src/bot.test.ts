@@ -85,14 +85,19 @@ describe("classify", () => {
 });
 
 function allowGraph(dids: string[]): GraphClient {
+  const allowed = new Set(dids);
   return {
     app: {
       bsky: {
         graph: {
-          getFollows: vi.fn(async () => ({
-            data: { follows: dids.map((did) => ({ did })) },
+          getRelationships: vi.fn(async ({ others }) => ({
+            data: {
+              relationships: others.map((did: string) => ({
+                did,
+                ...(allowed.has(did) ? { followedBy: "at://x" } : {}),
+              })),
+            },
           })),
-          getFollowers: vi.fn(async () => ({ data: { followers: [] } })),
         },
       },
     },
@@ -460,10 +465,14 @@ describe("drain-time allowlist re-check", () => {
         app: {
           bsky: {
             graph: {
-              getFollows: vi.fn(async () => ({
-                data: { follows: allowed.map((did) => ({ did })) },
+              getRelationships: vi.fn(async ({ others }) => ({
+                data: {
+                  relationships: others.map((did: string) => ({
+                    did,
+                    ...(allowed.includes(did) ? { followedBy: "at://x" } : {}),
+                  })),
+                },
               })),
-              getFollowers: vi.fn(async () => ({ data: { followers: [] } })),
             },
           },
         },

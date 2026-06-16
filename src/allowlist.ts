@@ -1,25 +1,33 @@
 // pattern: Imperative Shell
-// Resolves the bot's allowlist = the owner (@proptermalone) plus the union of
-// who the owner follows and who follows them. These are AppView graph reads, NOT
-// CourtListener calls, so they don't touch the 125/day budget. Cached with a
-// short TTL.
+// The bot's allowlist = the owner (@proptermalone) plus anyone the owner follows
+// OR who follows the owner. Membership is checked PER REQUESTER with a single
+// app.bsky.graph.getRelationships call (an AppView read, NOT a CourtListener
+// call — no 125/day budget), cached per-DID with a short TTL.
+//
+// This replaced eager enumeration of the owner's entire follows+followers set:
+// an owner with thousands of followers (proptermalone has ~9k) overran the page
+// cap, so legitimate followers in the tail were silently declined — and the bot
+// burned hundreds of paginated graph reads per minute. getRelationships answers
+// "is X in either set?" in one call per requester, authoritatively and cheaply.
 
-// Minimal slice of AtpAgent's graph API (mockable in tests).
+// Minimal slice of AtpAgent's graph API (mockable in tests). getRelationships
+// returns one entry per `others` DID: a Relationship (with `following`/
+// `followedBy` AT-URIs when those edges exist) or a NotFoundActor (neither field).
 export interface GraphClient {
   app: {
     bsky: {
       graph: {
-        getFollows(params: {
+        getRelationships(params: {
           actor: string;
-          limit?: number;
-          cursor?: string;
-        }): Promise<{ data: { follows: { did: string }[]; cursor?: string } }>;
-        getFollowers(params: {
-          actor: string;
-          limit?: number;
-          cursor?: string;
+          others: string[];
         }): Promise<{
-          data: { followers: { did: string }[]; cursor?: string };
+          data: {
+            relationships: {
+              did?: string;
+              following?: string; // set when the owner follows this account
+              followedBy?: string; // set when this account follows the owner
+            }[];
+          };
         }>;
       };
     };
@@ -53,52 +61,13 @@ export async function resolveOwnerDid(
   return data.did;
 }
 
-async function collectDids(
-  page: (cursor?: string) => Promise<{ dids: string[]; cursor?: string }>,
-): Promise<string[]> {
-  const out: string[] = [];
-  let cursor: string | undefined;
-  let guard = 0;
-  do {
-    const res = await page(cursor);
-    out.push(...res.dids);
-    cursor = res.cursor;
-  } while (cursor && ++guard < 100);
-  return out;
-}
-
-export async function resolveAllowlist(
-  client: GraphClient,
-  ownerDid: string,
-): Promise<Set<string>> {
-  const follows = await collectDids(async (cursor) => {
-    const { data } = await client.app.bsky.graph.getFollows({
-      actor: ownerDid,
-      limit: 100,
-      cursor,
-    });
-    return { dids: data.follows.map((f) => f.did), cursor: data.cursor };
-  });
-  const followers = await collectDids(async (cursor) => {
-    const { data } = await client.app.bsky.graph.getFollowers({
-      actor: ownerDid,
-      limit: 100,
-      cursor,
-    });
-    return { dids: data.followers.map((f) => f.did), cursor: data.cursor };
-  });
-  // The owner is always allowlisted: they must be able to drive their own bot,
-  // and they appear in neither their own follows nor their own followers.
-  return new Set([ownerDid, ...follows, ...followers]);
-}
-
 export class AllowlistCache {
-  private dids = new Set<string>();
-  private fetchedAt = 0;
-  // In-flight refresh, shared by concurrent callers (single-flight). Without it,
-  // two has() calls landing together at TTL expiry both launch resolveAllowlist
-  // and race to overwrite cache state — a duplicate, wasted graph fetch.
-  private refreshing: Promise<void> | null = null;
+  // Per-DID membership decisions with their fetch time, so each requester costs
+  // at most one getRelationships call per TTL window.
+  private cache = new Map<string, { allowed: boolean; at: number }>();
+  // Per-DID in-flight lookup, shared by concurrent callers (single-flight): two
+  // has(did) landing together at expiry would otherwise each fire a graph call.
+  private inflight = new Map<string, Promise<boolean>>();
 
   // 60s default: the drain-time re-check is authoritative, so this TTL is just a
   // soft cache that bounds how stale an enqueue-time decision can be. Tunable
@@ -110,24 +79,34 @@ export class AllowlistCache {
   ) {}
 
   async has(did: string): Promise<boolean> {
-    await this.ensureFresh();
-    return this.dids.has(did);
-  }
-
-  async ensureFresh(): Promise<void> {
-    if (this.fetchedAt > 0 && Date.now() - this.fetchedAt < this.ttlMs) return;
-    // Join an in-flight refresh rather than launching a second.
-    if (this.refreshing) return this.refreshing;
-    this.refreshing = this.refresh();
+    // The owner is always allowed — they must be able to drive their own bot,
+    // and they appear in neither their own follows nor their own followers. The
+    // short-circuit also saves a graph call on every owner-driven mention.
+    if (did === this.ownerDid) return true;
+    const hit = this.cache.get(did);
+    if (hit && Date.now() - hit.at < this.ttlMs) return hit.allowed;
+    const existing = this.inflight.get(did);
+    if (existing) return existing;
+    const p = this.resolve(did);
+    this.inflight.set(did, p);
     try {
-      await this.refreshing;
+      return await p;
     } finally {
-      this.refreshing = null;
+      this.inflight.delete(did);
     }
   }
 
-  private async refresh(): Promise<void> {
-    this.dids = await resolveAllowlist(this.client, this.ownerDid);
-    this.fetchedAt = Date.now();
+  private async resolve(did: string): Promise<boolean> {
+    const { data } = await this.client.app.bsky.graph.getRelationships({
+      actor: this.ownerDid,
+      others: [did],
+    });
+    const rel = data.relationships?.[0];
+    // Allowed iff the owner follows them OR they follow the owner. A NotFoundActor
+    // entry carries neither field, so it correctly resolves to false.
+    const allowed =
+      rel != null && (rel.following != null || rel.followedBy != null);
+    this.cache.set(did, { allowed, at: Date.now() });
+    return allowed;
   }
 }
