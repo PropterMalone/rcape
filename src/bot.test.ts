@@ -1173,6 +1173,70 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
+  it("does NOT re-post the case link on a reply that resolves to an already-shelved case", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      // Docket 69777799 already shelved (the bot posted its link in this thread).
+      await saveLedger(
+        ledgerPath,
+        recordCase(emptyLedger(), 69777799, {
+          did: "did:case",
+          handle: "abrego.rcape.org",
+          password: "pw",
+          createdAt: "2026-05-30",
+          completed: true,
+        }),
+      );
+      // A "thank you" reply that still carries the docket link → resolves to the
+      // existing case. On a reply, the link must NOT be re-posted.
+      const replyMention: MentionNotif = {
+        uri: "r-alice",
+        cid: "cr",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "thank you! https://www.courtlistener.com/docket/69777799/x/",
+        links: ["https://www.courtlistener.com/docket/69777799/x/"],
+        root: { uri: "m-root", cid: "cr" },
+        source: "reply",
+      };
+      const { agent, replies } = mockAgent([replyMention], null);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      };
+
+      await pollOnce(deps);
+
+      expect(replies).toHaveLength(0); // no redundant re-link
+      // But an explicit @-mention of the same existing case still replies.
+      const mention: MentionNotif = {
+        ...replyMention,
+        uri: "m-alice",
+        text: "@ape.rcape.org https://www.courtlistener.com/docket/69777799/x/",
+        source: "mention",
+      };
+      const { agent: agent2, replies: replies2 } = mockAgent([mention], null);
+      await pollOnce({
+        agent: agent2,
+        allowlist: new AllowlistCache(agent2.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath: join(dir, "queue2.json"),
+        provision: provisionStub,
+      });
+      expect(replies2.some((r) => r.text.includes("@abrego.rcape.org"))).toBe(
+        true,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("acks the owner's launch announcement with a bare 'Ook.' (no docket nudge)", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));

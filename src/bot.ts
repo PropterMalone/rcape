@@ -248,10 +248,12 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     const action = await classifyMention(m, deps, queue);
     const parent: StrongRef = { uri: m.uri, cid: m.cid };
 
-    // A plain reply (not an explicit @-mention) that yields nothing actionable —
-    // declined or no-docket — gets SILENCE, not a nudge: a "thanks" reply to the
-    // bot's "done" post must not draw "I admit only…" or "send me a link" noise.
-    // Explicit @-mentions still reply to everyone. ("skip" already posts nothing.)
+    // A plain reply (not an explicit @-mention) that yields nothing NEW gets
+    // SILENCE, not noise: a "thanks" reply to the bot's "done" post must not draw
+    // "I admit only…" / "send me a link" (declined/no-docket), NOR a re-post of the
+    // case link the bot already put in this thread (reply-exists) — the docket was
+    // resolved from the thread the bot itself replied in. Explicit @-mentions still
+    // reply to everyone. ("skip" already posts nothing.)
     const suppressNonActionable = m.source === "reply";
 
     if (action.kind === "reply-declined") {
@@ -278,15 +280,22 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         }),
       );
     } else if (action.kind === "reply-exists") {
-      const text = buildReply({ kind: "exists", handle: action.handle });
-      await deps.agent.reply(
-        parent,
-        m.root,
-        text,
-        action.did
-          ? replyFacets(text, deps, { handle: action.handle, did: action.did })
-          : replyFacets(text, deps),
-      );
+      // Suppress on a reply: re-linking a case the bot already shelved in this
+      // thread (the "thank you!" case) is the redundant inline link we don't want.
+      if (!suppressNonActionable) {
+        const text = buildReply({ kind: "exists", handle: action.handle });
+        await deps.agent.reply(
+          parent,
+          m.root,
+          text,
+          action.did
+            ? replyFacets(text, deps, {
+                handle: action.handle,
+                did: action.did,
+              })
+            : replyFacets(text, deps),
+        );
+      }
     } else if (action.kind === "ack-enqueue" || action.kind === "ack-queued") {
       const job: Job = {
         docketId: action.docketId,
