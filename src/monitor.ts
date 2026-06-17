@@ -194,7 +194,12 @@ export async function monitorOnce(
         `monitor: docket ${docketId} getDocket failed:`,
         e instanceof Error ? e.message : String(e),
       );
-      continue; // leave highWater + lastChecked untouched → retried next cadence
+      // Stamp checked (like the entry-fetch fault path) so a persistently-faulting
+      // getDocket doesn't get re-checked + re-charged every cadence. highWater is
+      // untouched, so the new filings are picked up on the next cadence's retry.
+      await stampChecked(cfg.ledgerPath, docketId, nowIso);
+      checked += 1;
+      continue;
     }
     await mutateLedger(cfg.ledgerPath, (l) =>
       chargeQuota(l, client.requestCount - MONITOR_RESERVED_CALLS, day, token),
@@ -238,13 +243,18 @@ export async function monitorOnce(
       })),
       result.failed,
     );
-    await mutateLedger(cfg.ledgerPath, (l) =>
-      recordCase(l, docketId, {
+    await mutateLedger(cfg.ledgerPath, (l) => {
+      // UNION this pass's failed rkeys with any the original provision left
+      // unrepaired (read fresh inside the lock) — recordCase merges field-wise, so
+      // a bare assignment would silently drop the provision-time repair targets.
+      const prior = l.cases[String(docketId)]?.backfillFailed ?? [];
+      const failed = [...new Set([...prior, ...result.failed])];
+      return recordCase(l, docketId, {
         ...(newHigh ? { highWater: newHigh } : {}),
-        ...(result.failed.length ? { backfillFailed: result.failed } : {}),
+        ...(failed.length ? { backfillFailed: failed } : {}),
         lastCheckedAt: nowIso,
-      } as CaseEntry),
-    );
+      } as CaseEntry);
+    });
     console.log(
       `monitor: docket ${docketId} (@${entry.handle}) +${result.published} new filing(s), ${result.failed.length} failed`,
     );

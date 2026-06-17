@@ -101,6 +101,9 @@ export async function fetchAndMapCase(
   // Entries — resumable. MAX_PAGES only chunks the loop; completion (next===null)
   // or a ThrottledError ends it. Every page is checkpointed, so a throttle
   // mid-pagination leaves durable progress and the next window resumes the tail.
+  // `seenCursors` guards against a pathological CL `next` that doesn't advance (or
+  // cycles): without it the outer loop would spin forever, 50 calls at a time.
+  const seenEntryCursors = new Set<string>();
   while (!(cp.entriesStarted && cp.entriesNext === null)) {
     const { next } = await client.fetchDocketEntries(opts.docketId, {
       resumeFrom: cp.entriesStarted ? cp.entriesNext : undefined,
@@ -114,12 +117,17 @@ export async function fetchAndMapCase(
     cp.entriesStarted = true;
     cp.entriesNext = next;
     await persist();
+    if (next !== null) {
+      if (seenEntryCursors.has(next)) break; // cursor not advancing — bail
+      seenEntryCursors.add(next);
+    }
   }
   console.log(`  ${cp.entries.length} entries`);
 
   // Parties — resumable. A ThrottledError MUST propagate (resume next window), not
   // be swallowed: swallowing it would "complete" the case with zero parties. Only
   // genuine non-throttle failures are tolerated (parties stay as-fetched/empty).
+  const seenPartyCursors = new Set<string>();
   try {
     while (!(cp.partiesStarted && cp.partiesNext === null)) {
       const { next } = await client.fetchParties(opts.docketId, {
@@ -134,6 +142,10 @@ export async function fetchAndMapCase(
       cp.partiesStarted = true;
       cp.partiesNext = next;
       await persist();
+      if (next !== null) {
+        if (seenPartyCursors.has(next)) break; // cursor not advancing — bail
+        seenPartyCursors.add(next);
+      }
     }
   } catch (e) {
     if (e instanceof ThrottledError) throw e;
