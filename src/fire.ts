@@ -23,7 +23,7 @@ const ENTRY = "org.rcape.docketEntry";
 const POST = "app.bsky.feed.post";
 const PROFILE = "app.bsky.actor.profile";
 
-interface LiveEntry {
+export interface LiveEntry {
   rkey: string;
   value: DocketEntryRecord;
 }
@@ -79,6 +79,55 @@ export interface FireResult {
   failed: string[];
 }
 
+// Post one BACKDATED companion doc-post per docket entry and link it back onto
+// the entry record (docPost strongRef). The entries MUST already exist as records
+// in the repo (their rkeys are used to attach the docPost). Shared by the initial
+// backfill (all entries) and the watched-case monitor (only the new ones) so both
+// get the unique strictly-increasing createdAt fix. Per-entry failures are
+// collected, never thrown — a flaky post leaves that entry below the high-water
+// line so the next pass retries it.
+export async function postEntries(
+  repo: CaseRepo,
+  entries: LiveEntry[],
+  caseName: string,
+  caseUrl: string,
+): Promise<FireResult> {
+  // Unique strictly-increasing createdAt per post (see backdatedCreatedAts): a
+  // shared date-only timestamp would make the AppView feed show one filing per
+  // day, hiding the rest. Order matches the publish loop below.
+  const createdAts = backdatedCreatedAts(entries.map((e) => e.value.dateFiled));
+
+  let published = 0;
+  const failed: string[] = [];
+  for (const [i, e] of entries.entries()) {
+    try {
+      const post = entryToPost(
+        e.value,
+        caseName,
+        caseUrl,
+        createdAts[i] ?? e.value.dateFiled,
+      );
+      const created = await repo.createRecord(
+        POST,
+        post as unknown as Record<string, unknown>,
+      );
+      const docPost: PostRef = { uri: created.uri, cid: created.cid };
+      await repo.putRecord(ENTRY, e.rkey, {
+        ...e.value,
+        docPost,
+      } as unknown as Record<string, unknown>);
+      if (++published % 25 === 0) {
+        console.log(`  posted ${published}/${entries.length}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  entry ${e.rkey} failed: ${msg}`);
+      failed.push(e.rkey);
+    }
+  }
+  return { published, failed };
+}
+
 export async function fireBackfill(
   repo: CaseRepo,
   opts: { force?: boolean } = {},
@@ -123,39 +172,12 @@ export async function fireBackfill(
   });
   console.log("profile + pinned seed published");
 
-  // Unique strictly-increasing createdAt per post (see backdatedCreatedAts): a
-  // shared date-only timestamp would make the AppView feed show one filing per
-  // day, hiding the rest. Order matches the publish loop below.
-  const createdAts = backdatedCreatedAts(entries.map((e) => e.value.dateFiled));
-
-  let published = 0;
-  const failed: string[] = [];
-  for (const [i, e] of entries.entries()) {
-    try {
-      const post = entryToPost(
-        e.value,
-        docket.caseName,
-        caseUrl,
-        createdAts[i] ?? e.value.dateFiled,
-      );
-      const created = await repo.createRecord(
-        POST,
-        post as unknown as Record<string, unknown>,
-      );
-      const docPost: PostRef = { uri: created.uri, cid: created.cid };
-      await repo.putRecord(ENTRY, e.rkey, {
-        ...e.value,
-        docPost,
-      } as unknown as Record<string, unknown>);
-      if (++published % 25 === 0) {
-        console.log(`  posted ${published}/${entries.length}`);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`  entry ${e.rkey} failed: ${msg}`);
-      failed.push(e.rkey);
-    }
-  }
+  const { published, failed } = await postEntries(
+    repo,
+    entries,
+    docket.caseName,
+    caseUrl,
+  );
   console.log(
     `done — ${published}/${entries.length} doc-posts published, ${failed.length} failed on @${repo.handle}.`,
   );

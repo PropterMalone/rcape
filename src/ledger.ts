@@ -23,8 +23,14 @@ export interface CaseEntry {
   // persisted early so the account/password isn't orphaned), NOT a finished case:
   // the dedupe guard must resume it, not report it as already provisioned.
   completed?: boolean;
-  // High-water recapSequenceNumber for the (future) watched-case monitor.
+  // High-water recapSequenceNumber for the watched-case monitor: the monitor only
+  // posts entries whose recapSequenceNumber sorts ABOVE this, then advances it to
+  // the highest actually-posted entry.
   highWater?: string;
+  // ISO timestamp of the monitor's last poll of this case. Drives the per-case
+  // cadence gate (re-checked only after MONITOR_INTERVAL_MS) so the monitor
+  // spreads its CL calls instead of re-fetching every case every cycle.
+  lastCheckedAt?: string;
   // rkeys whose backdated doc-post failed during backfill — entries that exist
   // as records but have no companion post yet (repair target).
   backfillFailed?: string[];
