@@ -10,6 +10,7 @@ import {
   emptyLedger,
   loadLedger,
   quotaRemaining,
+  recordCalls,
   recordCase,
   saveLedger,
 } from "./ledger.js";
@@ -843,6 +844,84 @@ describe("rate-limit throttling", () => {
       );
     } finally {
       vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops the drain BEFORE a 429 when the rolling 24h window is full (calendar counter still fresh)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      // The exact 2026-06-16 post-reset state: the calendar counter reads fresh
+      // (emptyLedger → 125 free) while CL's rolling 24h window still holds 120
+      // calls made 12h ago. Without the rolling log the bot drains into a 429.
+      const now = Date.now();
+      const seeded = recordCalls(emptyLedger(), "t", now - 12 * 3_600_000, 120);
+      await saveLedger(ledgerPath, seeded);
+      const { agent, replies } = mockAgent([aliceMention()]);
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      // The predictive gate stopped the drain — provision was NEVER called, so no
+      // CL request was issued and no 429 was eaten.
+      expect(attempts).toBe(0);
+      const q = await loadQueue(queuePath);
+      expect(q.jobs[0]?.status).toBe("queued"); // resumes a later cycle
+      // The 24h window reopens ~12h out, well past the hourly ceiling → "tomorrow".
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        true,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports 'hang tight' (not 'tomorrow') when only the 5/min window blocks the start", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      // 5 calls this minute → the next call would 429 ("5/min"), but the minute
+      // window reopens in <60s. classifyDeferral must say "hang tight", not "tomorrow".
+      const seeded = recordCalls(emptyLedger(), "t", Date.now(), 5);
+      await saveLedger(ledgerPath, seeded);
+      const { agent, replies } = mockAgent([aliceMention()]);
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return provisionStub();
+        },
+      };
+
+      await pollOnce(deps);
+
+      expect(attempts).toBe(0); // predicted, never fired
+      expect(
+        replies.some((r) => r.text.toLowerCase().includes("hang tight")),
+      ).toBe(true);
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        false,
+      );
+    } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });

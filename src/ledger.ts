@@ -60,10 +60,30 @@ export interface Ledger {
   // drain doesn't re-discover the same throttle one queued case at a time. Stale
   // (past) entries are ignored, so they need no cleanup.
   throttledUntil?: Record<string, string>;
+  // Per-token rolling call log: ascending ms-epoch timestamps of CL requests in
+  // the last 24h, keyed by tokenId. This is the PREDICTIVE counterpart to `quota`
+  // (which resets on the calendar day): CL enforces 5/min·50/hr·125/day as ROLLING
+  // windows, so right after our 8pm-ET calendar reset the day-counter reads fresh
+  // while CL still remembers the prior ~24h and 429s us (the 2026-06-16 freeze).
+  // The log lets selectToken/classifyDeferral stop a drain BEFORE the 429 and
+  // report the exact reopen time. Pruned to 24h on every record (bounded ≤~125).
+  calls?: Record<string, number[]>;
 }
 
 // CourtListener free tier: 125 requests/day per token.
 export const DAILY_CAP = 125;
+
+// CL's per-token throttle windows for the docket endpoints, verified live
+// 2026-06-17 (the 429 body literally reads "Rate limit exceeded: 5/min"). These
+// are DRF SCOPED throttles, stricter than the 5000/hr headline that governs other
+// scopes. `cap` is the max requests CL allows within `windowMs`. The 24h window
+// is the rolling form of DAILY_CAP — what our calendar counter approximates badly.
+const CL_RATE_WINDOWS: ReadonlyArray<{ windowMs: number; cap: number }> = [
+  { windowMs: 60_000, cap: 5 }, // 5/min
+  { windowMs: 3_600_000, cap: 50 }, // 50/hr
+];
+const CL_DAILY_WINDOW = { windowMs: 86_400_000, cap: DAILY_CAP }; // 125/24h rolling
+const ROLLING_PRUNE_MS = CL_DAILY_WINDOW.windowMs; // widest window bounds the log
 
 // Stable, non-secret fingerprint of a CL token, used as the per-token quota key
 // so the raw token never lands in the (credential-bearing but still) ledger.
@@ -217,12 +237,81 @@ export function markTokenThrottled(
   };
 }
 
+// Append `n` actual CL requests made at `nowMs` against `token`, pruning entries
+// that have aged out of the 24h window so the log stays bounded. Timestamps are
+// kept ascending. Charged from the real `requestCount` AFTER a fetch (not the
+// upfront reservation) so the log reflects calls CL actually saw.
+export function recordCalls(
+  ledger: Ledger,
+  token: string,
+  nowMs: number,
+  n: number,
+): Ledger {
+  const id = tokenId(token);
+  const cutoff = nowMs - ROLLING_PRUNE_MS;
+  const kept = (ledger.calls?.[id] ?? []).filter((t) => t > cutoff);
+  for (let i = 0; i < n; i++) kept.push(nowMs);
+  return { ...ledger, calls: { ...ledger.calls, [id]: kept } };
+}
+
+// The earliest time (ms epoch) at which `count` requests in the window of width
+// `windowMs` (cap `cap`) leaves at least `minFree` headroom — i.e. when enough of
+// the oldest in-window calls age out. Returns `nowMs` when already open. `calls`
+// must be ascending. `minFree > cap` is unsatisfiable (the case can never fit the
+// window) → Infinity, surfaced to the caller as "never on this token".
+function windowReopenMs(
+  calls: number[],
+  windowMs: number,
+  cap: number,
+  minFree: number,
+  nowMs: number,
+): number {
+  const allowed = cap - minFree; // max in-window calls that still leaves minFree
+  if (allowed < 0) return Number.POSITIVE_INFINITY;
+  const active = calls.filter((t) => t > nowMs - windowMs);
+  if (active.length <= allowed) return nowMs;
+  // Drop the m oldest active calls so the remainder fits; the m-th ages out of
+  // the window at active[m-1] + windowMs. allowed ≥ 0 and active.length > allowed
+  // here, so 1 ≤ m ≤ active.length — the index is always in range.
+  const m = active.length - allowed;
+  const ageOut = active[m - 1] as number;
+  return ageOut + windowMs;
+}
+
+// The earliest time `token` can START a case needing `need` daily slots without
+// tripping any CL throttle: the 24h window must free `need` slots; the 5/min and
+// 50/hr windows need only one free slot (the fetch paces itself across them and
+// the client absorbs short 429s). `need` is NOT applied to the small rate windows
+// — demanding 12 free in a cap-5 minute window would be permanently unsatisfiable.
+// Returns ≤ nowMs when the token is startable now.
+export function rollingStartableAt(
+  ledger: Ledger,
+  token: string,
+  need: number,
+  nowMs: number,
+): number {
+  const calls = ledger.calls?.[tokenId(token)] ?? [];
+  return Math.max(
+    windowReopenMs(
+      calls,
+      CL_DAILY_WINDOW.windowMs,
+      CL_DAILY_WINDOW.cap,
+      need,
+      nowMs,
+    ),
+    ...CL_RATE_WINDOWS.map((w) =>
+      windowReopenMs(calls, w.windowMs, w.cap, 1, nowMs),
+    ),
+  );
+}
+
 // Pick the first configured token with at least `need` requests left today AND
-// not in a hourly-throttle cooldown, or undefined when none qualifies. A single
-// case must run end-to-end on ONE token (CL pagination carries the token), so
-// headroom can't be pooled across tokens — we need one token that can cover the
-// whole case. Pass `nowMs` to honor the throttle cooldown; omit it (legacy
-// callers/tests that don't model throttling) to consider quota only.
+// not in a hourly-throttle cooldown AND whose rolling 5/min·50/hr·125/24h windows
+// are open right now, or undefined when none qualifies. A single case must run
+// end-to-end on ONE token (CL pagination carries the token), so headroom can't be
+// pooled across tokens — we need one token that can cover the whole case. Pass
+// `nowMs` to honor the throttle cooldown AND the rolling-window prediction; omit
+// it (legacy callers/tests) to consider the calendar-day quota only.
 export function selectToken(
   ledger: Ledger,
   tokens: string[],
@@ -233,7 +322,9 @@ export function selectToken(
   return tokens.find(
     (t) =>
       quotaRemaining(ledger, day, t) >= need &&
-      (nowMs === undefined || !isThrottled(ledger, t, nowMs)),
+      (nowMs === undefined ||
+        (!isThrottled(ledger, t, nowMs) &&
+          rollingStartableAt(ledger, t, need, nowMs) <= nowMs)),
   );
 }
 
@@ -260,6 +351,9 @@ function normalize(parsed: Partial<Ledger>): Ledger {
   // absent so legacy ledgers don't grow an empty key). Stale entries are ignored
   // at read time (isThrottled), so no expiry pass is needed here.
   if (parsed.throttledUntil) out.throttledUntil = parsed.throttledUntil;
+  // Carry the rolling call log through load/mutate (omitted when absent so legacy
+  // ledgers don't grow an empty key). Pruning happens at record time, not here.
+  if (parsed.calls) out.calls = parsed.calls;
   return out;
 }
 

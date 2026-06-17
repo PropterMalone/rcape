@@ -13,12 +13,16 @@ import {
   loadLedger,
   markTokenThrottled,
   quotaRemaining,
+  recordCalls,
   recordCase,
+  rollingStartableAt,
   saveLedger,
   selectToken,
   takenHandles,
   tokenId,
 } from "./ledger.js";
+
+const HR = 3_600_000;
 
 const DAY = "2026-05-30";
 
@@ -331,6 +335,65 @@ describe("token pool (per-token quota + selection)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("rolling-window call log (predictive 5/min·50/hr·125/24h gate)", () => {
+  const TOK = "token-a";
+  // A fixed wall-clock anchor; all timestamps are offsets from it (no Date.now).
+  const NOW = 1_750_000_000_000;
+
+  it("records calls and prunes entries older than the 24h window", () => {
+    let l: Ledger = recordCalls(emptyLedger(), TOK, NOW, 3);
+    expect(l.calls?.[tokenId(TOK)]?.length).toBe(3);
+    // A later charge past 24h prunes the now-stale entries as it appends.
+    l = recordCalls(l, TOK, NOW + 25 * HR, 1);
+    expect(l.calls?.[tokenId(TOK)]?.length).toBe(1);
+  });
+
+  it("is startable immediately when the log is empty", () => {
+    expect(rollingStartableAt(emptyLedger(), TOK, 12, NOW)).toBeLessThanOrEqual(
+      NOW,
+    );
+  });
+
+  it("blocks on the 5/min window and reopens when the oldest minute-call ages out", () => {
+    // 5 calls this minute → the 6th would 429 ("5/min", verified live 2026-06-17).
+    const l = recordCalls(emptyLedger(), TOK, NOW, 5);
+    expect(rollingStartableAt(l, TOK, 12, NOW)).toBe(NOW + 60_000);
+    // Once 60s pass, the minute window has room again.
+    expect(rollingStartableAt(l, TOK, 12, NOW + 60_001)).toBeLessThanOrEqual(
+      NOW + 60_001,
+    );
+  });
+
+  it("does not apply the case-size `need` to the small 5/min window", () => {
+    // 3 calls this minute, need=12: the minute window (cap 5) must NOT demand 12
+    // free or it would be permanently unsatisfiable. need governs the 24h budget.
+    const l = recordCalls(emptyLedger(), TOK, NOW, 3);
+    expect(rollingStartableAt(l, TOK, 12, NOW)).toBeLessThanOrEqual(NOW);
+  });
+
+  it("blocks on the 125/24h rolling window and reopens exactly when calls age out", () => {
+    // 120 calls made 23h ago: minute & hour windows are clear now, but the 24h
+    // window is at 120/125 — starting a case that needs 12 would breach it. They
+    // age out of the rolling window at t0 + 24h (= NOW + 1h).
+    const t0 = NOW - 23 * HR;
+    const l = recordCalls(emptyLedger(), TOK, t0, 120);
+    expect(rollingStartableAt(l, TOK, 12, NOW)).toBe(NOW + HR);
+  });
+
+  it("selectToken honors the rolling gate only when nowMs is supplied (the root-cause fix)", () => {
+    // The 2026-06-16 freeze: the calendar counter read fresh after the 8pm reset
+    // (new day → 125 free) while CL's rolling 24h window still held us locked.
+    const t0 = NOW - 23 * HR;
+    const l = recordCalls(emptyLedger(), TOK, t0, 120);
+    // Legacy call (no nowMs): only the calendar counter is consulted → selected.
+    expect(selectToken(l, [TOK], DAY, 12)).toBe(TOK);
+    // With nowMs: the rolling 24h window blocks the start BEFORE we'd 429.
+    expect(selectToken(l, [TOK], DAY, 12, NOW)).toBeUndefined();
+    // After the old calls age out, the token is startable again.
+    expect(selectToken(l, [TOK], DAY, 12, NOW + HR + 1)).toBe(TOK);
   });
 });
 

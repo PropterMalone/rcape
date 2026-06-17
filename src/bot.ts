@@ -24,6 +24,8 @@ import {
   markTokenThrottled,
   mutateLedger,
   quotaRemaining,
+  recordCalls,
+  rollingStartableAt,
   selectToken,
   throttledUntilMs,
 } from "./ledger.js";
@@ -421,10 +423,21 @@ async function classifyMention(
     const ref = parseCaseRef(m.text);
     if (ref) {
       const before = await loadLedger(deps.cfg.ledgerPath);
-      const token = selectToken(before, deps.cfg.tokens, today(), 1);
+      const token = selectToken(
+        before,
+        deps.cfg.tokens,
+        today(),
+        1,
+        Date.now(),
+      );
       if (token) {
         await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
-          chargeQuota(fresh, 1, today(), token),
+          recordCalls(
+            chargeQuota(fresh, 1, today(), token),
+            token,
+            Date.now(),
+            1,
+          ),
         );
         // courtId scopes bankruptcy numbers (which collide across courts) to one
         // docket; it's null for the self-unique district format, leaving that
@@ -456,13 +469,25 @@ async function classifyMention(
       .catch(() => null);
     if (hint) {
       const before = await loadLedger(deps.cfg.ledgerPath);
-      const token = selectToken(before, deps.cfg.tokens, today(), 1);
+      const token = selectToken(
+        before,
+        deps.cfg.tokens,
+        today(),
+        1,
+        Date.now(),
+      );
       if (token) {
         // Charge the search call before issuing it, same crash-safe direction
         // as provisioning's reservation: a crash mid-search wastes 1 budgeted
-        // call rather than leaving an unaccounted one.
+        // call rather than leaving an unaccounted one. recordCalls logs it to the
+        // rolling window too, so the next selectToken sees this spend.
         await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
-          chargeQuota(fresh, 1, today(), token),
+          recordCalls(
+            chargeQuota(fresh, 1, today(), token),
+            token,
+            Date.now(),
+            1,
+          ),
         );
         const res = await deps
           .searchDockets(hint.caption, hint.courtId ?? undefined, token)
@@ -546,11 +571,13 @@ async function notifyAllDeferred(
 }
 
 // When no token can start a case, decide what waiting requesters hear. Genuinely
-// out of daily budget anywhere ⇒ "tomorrow". Otherwise every budgeted token is in
-// a cooldown: if the soonest reopens within the hour it's the 50/hr window ("hang
-// tight"); if it's further out it's CL's daily window outlasting our calendar-day
-// counter, so still "tomorrow". Honoring CL's reopen time here is what stops the
-// bot promising "hang tight" against a 10h lock (2026-06-16).
+// out of daily budget anywhere ⇒ "tomorrow". Otherwise every budgeted token is
+// blocked by a cooldown OR the rolling-window prediction: if the soonest reopen is
+// within the hour it's the 5/min or 50/hr window ("hang tight"); if it's further
+// out it's CL's rolling 24h window outlasting our calendar-day counter, so still
+// "tomorrow". The reopen time merges the reactive throttle cooldown (set after a
+// 429) with the PREDICTIVE rolling-window time (rollingStartableAt), so the notice
+// is honest even when we never fired a 429 — the whole point of the rolling log.
 function classifyDeferral(
   ledger: Ledger,
   tokens: string[],
@@ -562,7 +589,12 @@ function classifyDeferral(
   );
   if (budgeted.length === 0) return "deferred";
   const soonestReopen = Math.min(
-    ...budgeted.map((t) => throttledUntilMs(ledger, t, nowMs) ?? nowMs),
+    ...budgeted.map((t) =>
+      Math.max(
+        throttledUntilMs(ledger, t, nowMs) ?? nowMs,
+        rollingStartableAt(ledger, t, MIN_QUOTA_FOR_CASE, nowMs),
+      ),
+    ),
   );
   return soonestReopen - nowMs > THROTTLE_HOURLY_CEILING_MS
     ? "deferred"

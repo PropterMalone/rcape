@@ -33,6 +33,7 @@ import {
   findCase,
   loadLedger,
   mutateLedger,
+  recordCalls,
   recordCase,
   selectToken,
   takenHandles,
@@ -200,14 +201,24 @@ export function postedHighWater(
 // then charge the delta (actual - reservation). The delta is negative when the
 // case needed fewer than the reserved ~17 calls, refunding the over-reservation.
 // quotaRemaining clamps at zero, so a net under-count is harmless.
+//
+// Also append the ACTUAL calls to the rolling 24h log (recordCalls): the calendar
+// counter resets at 8pm ET but CL's rolling windows don't, so the log is what lets
+// the next selectToken predict a 429 instead of eating one (2026-06-16 freeze).
 async function reconcileQuota(
   ledgerPath: string,
   actualCalls: number,
   day: string,
   token: string,
 ): Promise<Ledger> {
+  const nowMs = Date.now();
   return mutateLedger(ledgerPath, (fresh) =>
-    chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day, token),
+    recordCalls(
+      chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day, token),
+      token,
+      nowMs,
+      actualCalls,
+    ),
   );
 }
 

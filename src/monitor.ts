@@ -19,6 +19,7 @@ import {
   chargeQuota,
   loadLedger,
   mutateLedger,
+  recordCalls,
   recordCase,
   selectToken,
 } from "./ledger.js";
@@ -116,6 +117,19 @@ export async function monitorOnce(
 
   let checked = 0;
   let updated = 0;
+  // Reconcile the monitor's reservation to the calls actually spent AND append
+  // them to the rolling 24h log (recordCalls) — same dual accounting as
+  // runProvision's reconcileQuota, so the next selectToken predicts CL's rolling
+  // windows instead of eating a 429.
+  const reconcileMonitor = (tok: string, calls: number) =>
+    mutateLedger(cfg.ledgerPath, (l) =>
+      recordCalls(
+        chargeQuota(l, calls - MONITOR_RESERVED_CALLS, day, tok),
+        tok,
+        Date.now(),
+        calls,
+      ),
+    );
   for (const { docketId, entry } of due) {
     // Budget gate per case (re-read for live quota): only proceed with headroom
     // BEYOND a full provisioning case, so monitoring never starves a live request.
@@ -143,14 +157,7 @@ export async function monitorOnce(
         entry.highWater as string,
       );
     } catch (e) {
-      await mutateLedger(cfg.ledgerPath, (l) =>
-        chargeQuota(
-          l,
-          client.requestCount - MONITOR_RESERVED_CALLS,
-          day,
-          token,
-        ),
-      );
+      await reconcileMonitor(token, client.requestCount);
       if (e instanceof ThrottledError) break; // window closed — stop this cycle
       console.error(
         `monitor: docket ${docketId} entry fetch failed:`,
@@ -163,14 +170,7 @@ export async function monitorOnce(
     }
 
     if (newRaw.length === 0) {
-      await mutateLedger(cfg.ledgerPath, (l) =>
-        chargeQuota(
-          l,
-          client.requestCount - MONITOR_RESERVED_CALLS,
-          day,
-          token,
-        ),
-      );
+      await reconcileMonitor(token, client.requestCount);
       await stampChecked(cfg.ledgerPath, docketId, nowIso);
       checked += 1;
       continue;
@@ -181,14 +181,7 @@ export async function monitorOnce(
     try {
       docket = await client.getDocket(docketId);
     } catch (e) {
-      await mutateLedger(cfg.ledgerPath, (l) =>
-        chargeQuota(
-          l,
-          client.requestCount - MONITOR_RESERVED_CALLS,
-          day,
-          token,
-        ),
-      );
+      await reconcileMonitor(token, client.requestCount);
       if (e instanceof ThrottledError) break;
       console.error(
         `monitor: docket ${docketId} getDocket failed:`,
@@ -201,9 +194,7 @@ export async function monitorOnce(
       checked += 1;
       continue;
     }
-    await mutateLedger(cfg.ledgerPath, (l) =>
-      chargeQuota(l, client.requestCount - MONITOR_RESERVED_CALLS, day, token),
-    );
+    await reconcileMonitor(token, client.requestCount);
 
     const source = makeSource(docket, nowIso);
     const caseName = mapDocket(docket, nowIso, nowIso).caseName;
