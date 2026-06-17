@@ -34,6 +34,14 @@ export interface CaseEntry {
   // rkeys whose backdated doc-post failed during backfill — entries that exist
   // as records but have no companion post yet (repair target).
   backfillFailed?: string[];
+  // Case facts snapshot for the reply link card (see card.ts). Persisted at
+  // provision so the dedupe ("exists") reply can build the same rich card
+  // without a CL fetch. Absent on entries written before cards existed → the
+  // card falls back to a generic title.
+  caseName?: string;
+  docketNumber?: string;
+  courtName?: string;
+  filings?: number;
   // Prior accounts displaced by a --force re-provision of the same docket. Kept
   // so a superseded account's credentials are never silently lost (the ledger
   // is the only credential store).

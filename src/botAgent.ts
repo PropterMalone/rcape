@@ -69,7 +69,14 @@ export interface BotAgent {
     root: StrongRef,
     text: string,
     facets?: MentionFacet[],
+    // Optional link card (app.bsky.embed.external). Opaque here; built by card.ts
+    // and rendered below the reply text. Omitted ⇒ a plain text+facets reply.
+    embed?: unknown,
   ): Promise<StrongRef>;
+  // Upload bytes (e.g. the seal thumbnail) to the bot's repo and return the
+  // BlobRef to reference in a record's embed. Called once at startup so the card
+  // thumb is uploaded a single time and reused across every reply.
+  uploadBlob(bytes: Uint8Array, mimeType: string): Promise<unknown>;
   // Mark notifications up to `seenAt` as read, so the bot account's unread badge
   // clears and the next listNotifications can rely on the server's seen marker.
   updateSeen(seenAt: string): Promise<void>;
@@ -166,7 +173,7 @@ export async function createBotAgent(opts: {
         };
       }, opts);
     },
-    async reply(parent, root, text, facets): Promise<StrongRef> {
+    async reply(parent, root, text, facets, embed): Promise<StrongRef> {
       const res = await agent.com.atproto.repo.createRecord({
         repo: did,
         collection: POST,
@@ -179,9 +186,17 @@ export async function createBotAgent(opts: {
           // Mention facets notify + link the @handles in the copy; omitted when
           // a reply has none (no-docket/not-found/ack) so the field stays absent.
           ...(facets && facets.length > 0 ? { facets } : {}),
+          // Link card for case-handing replies (provisioned/exists); absent otherwise.
+          ...(embed ? { embed } : {}),
         },
       });
       return { uri: res.data.uri, cid: res.data.cid };
+    },
+    async uploadBlob(bytes, mimeType): Promise<unknown> {
+      const { data } = await agent.com.atproto.repo.uploadBlob(bytes, {
+        encoding: mimeType,
+      });
+      return data.blob;
     },
     async updateSeen(seenAt): Promise<void> {
       await agent.app.bsky.notification.updateSeen({ seenAt });

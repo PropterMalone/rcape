@@ -97,10 +97,24 @@ export type ProvisionResult =
       handle: string;
       did: string;
       caseName: string;
+      // For the reply link card (card.ts). courtName is the readable label
+      // (falls back to the court id when CL omits it).
+      docketNumber?: string;
+      courtName?: string;
       published: number;
       failed: number;
     }
-  | { status: "exists"; handle: string; did: string }
+  // caseName/docketNumber/courtName/filings carry the case-card facts read from
+  // the existing ledger entry (absent on pre-card entries → generic card).
+  | {
+      status: "exists";
+      handle: string;
+      did: string;
+      caseName?: string;
+      docketNumber?: string;
+      courtName?: string;
+      filings?: number;
+    }
   | {
       status: "dry-run";
       handle: string;
@@ -239,7 +253,15 @@ export async function runProvision(
   const mode = provisionMode(existing, opts.force ?? false);
 
   if (mode.kind === "exists") {
-    return { status: "exists", handle: mode.entry.handle, did: mode.entry.did };
+    return {
+      status: "exists",
+      handle: mode.entry.handle,
+      did: mode.entry.did,
+      caseName: mode.entry.caseName,
+      docketNumber: mode.entry.docketNumber,
+      courtName: mode.entry.courtName,
+      filings: mode.entry.filings,
+    };
   }
 
   const day = new Date().toISOString().slice(0, 10);
@@ -437,6 +459,8 @@ export async function runProvision(
       }));
     // Terminal write: this is the ONLY place `completed` is set — it marks the
     // case fully provisioned so a future re-run dedupes instead of resuming.
+    const courtName =
+      mapped.docketRecord.courtName ?? mapped.docketRecord.court;
     ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
       recordCase(fresh, docketId, {
         did: account.did,
@@ -446,6 +470,11 @@ export async function runProvision(
         completed: true,
         highWater: postedHighWater(entrySeqs, result.failed),
         backfillFailed: result.failed.length > 0 ? result.failed : undefined,
+        // Card facts for the dedupe reply later (see CaseEntry / card.ts).
+        caseName: mapped.docketRecord.caseName,
+        docketNumber: mapped.docketRecord.docketNumber,
+        courtName,
+        filings: result.published,
       }),
     );
 
@@ -454,6 +483,8 @@ export async function runProvision(
       handle: account.handle,
       did: account.did,
       caseName: mapped.docketRecord.caseName,
+      docketNumber: mapped.docketRecord.docketNumber,
+      courtName,
       published: result.published,
       failed: result.failed.length,
     };

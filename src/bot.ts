@@ -5,10 +5,12 @@
 // budget — posting the "done" reply with the new @handle. `classify` is a pure
 // decision function (unit-tested); `pollOnce` is one testable cycle.
 
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
+import { buildCaseCard } from "./card.js";
 import type { CaseHint } from "./caseHint.js";
 import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
@@ -155,6 +157,9 @@ export interface BotDeps {
   // mention facet in the "declined" reply. Optional: when absent, the declined
   // reply still posts — just without the owner facet.
   ownerDid?: string;
+  // Seal BlobRef for the reply link-card thumbnail, uploaded once at startup.
+  // Optional: absent ⇒ cards render text-only (no thumb).
+  cardThumb?: unknown;
   provision?: (
     docketId: number,
     cfg: ProvisionConfig,
@@ -663,19 +668,41 @@ async function drain(
         handle: result.handle,
         failed: result.failed,
       });
+      const card = buildCaseCard(
+        {
+          handle: result.handle,
+          caseName: result.caseName,
+          docketNumber: result.docketNumber,
+          courtName: result.courtName,
+          filings: result.published,
+        },
+        deps.cardThumb,
+      );
       await deps.agent.reply(
         parent,
         job.rootRef,
         text,
         replyFacets(text, deps, { handle: result.handle, did: result.did }),
+        card,
       );
     } else if (result.status === "exists") {
       const text = buildReply({ kind: "exists", handle: result.handle });
+      const card = buildCaseCard(
+        {
+          handle: result.handle,
+          caseName: result.caseName,
+          docketNumber: result.docketNumber,
+          courtName: result.courtName,
+          filings: result.filings,
+        },
+        deps.cardThumb,
+      );
       await deps.agent.reply(
         parent,
         job.rootRef,
         text,
         replyFacets(text, deps, { handle: result.handle, did: result.did }),
+        card,
       );
     } else if (result.status === "not-found") {
       await deps.agent.reply(
@@ -742,12 +769,27 @@ async function main(): Promise<void> {
   // the deps fields stay undefined and the bot behaves exactly as v1a.
   const geminiKey = process.env.RCAPE_GEMINI_API_KEY;
   const geminiModel = process.env.RCAPE_GEMINI_MODEL ?? "gemini-2.5-flash-lite";
+  // Upload the seal once for the reply link-card thumbnail; reused across every
+  // reply. Best-effort — a failure just yields text-only cards.
+  let cardThumb: unknown;
+  try {
+    const sealPath = fileURLToPath(
+      new URL("../assets/avatar.png", import.meta.url),
+    );
+    cardThumb = await agent.uploadBlob(await readFile(sealPath), "image/png");
+    console.log("reply card thumbnail ready.");
+  } catch (e) {
+    console.warn(
+      `card thumbnail unavailable: ${e instanceof Error ? e.message : e}`,
+    );
+  }
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,
+    cardThumb,
     // Always wired (no Gemini needed): a fresh client per call (no throttle
     // interleaving with a concurrent provision client / no 13s pre-wait).
     searchByDocketNumber: async (caseNumber, courtId, token) => {

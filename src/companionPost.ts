@@ -63,6 +63,17 @@ export function backdatedCreatedAts(dateFileds: readonly string[]): string[] {
   });
 }
 
+// A filing renders one of two ways, so the timeline visibly distinguishes "the
+// actual PDF is here" from "this entry has no document in RECAP":
+//   📄 DOCUMENT — the RECAP scan is gathered (is_available); the card links to
+//      the storage.courtlistener.com PDF and tags page count.
+//   🗂 DOCKET ENTRY — text-only/un-gathered; the card links to the CourtListener
+//      docket page and says "docket only".
+// Gating the PDF link on isAvailable === true (not merely sourceUrl present) also
+// avoids a dead link: a filepath can exist for a document CL hasn't gathered.
+const DOC_ICON = "📄";
+const DOCKET_ICON = "🗂";
+
 export function entryToPost(
   entry: DocketEntryRecord,
   caseName: string,
@@ -70,15 +81,33 @@ export function entryToPost(
   createdAt: string,
 ): BskyPost {
   const date = entry.dateFiled.slice(0, 10);
+  const doc = entry.documents?.[0];
+  const hasPdf = doc?.sourceUrl != null && doc.isAvailable === true;
+  const icon = hasPdf ? DOC_ICON : DOCKET_ICON;
+
   const label = entry.entryNumber != null ? `Doc ${entry.entryNumber}: ` : "";
-  const head = `📄 ${caseName} — ${label}`;
+  const head = `${icon} ${caseName} — ${label}`;
   const tail = ` (${date})`;
   const body = truncate(
     entry.description,
     MAX_GRAPHEMES - head.length - tail.length,
   );
   const text = truncate(`${head}${body}${tail}`, MAX_GRAPHEMES);
-  const doc = entry.documents?.[0];
+
+  // Card title names the KIND ("Doc N" vs "Docket entry N"); the description
+  // carries a type tag ("· N pp · PDF" vs "· docket only"). Together with the
+  // card-footer domain (storage vs www), the two kinds read apart at a glance.
+  const numLabel = entry.entryNumber != null ? ` ${entry.entryNumber}` : "";
+  const cardTitle = hasPdf
+    ? `${DOC_ICON} Doc${numLabel} · ${caseName}`
+    : `${DOCKET_ICON} Docket entry${numLabel} · ${caseName}`;
+  const typeTag = hasPdf
+    ? doc?.pageCount
+      ? ` · ${doc.pageCount} pp · PDF`
+      : " · PDF"
+    : " · docket only";
+  const description = `${truncate(entry.description, 240)}${typeTag}`;
+
   return {
     $type: "app.bsky.feed.post",
     text,
@@ -86,9 +115,9 @@ export function entryToPost(
     embed: {
       $type: "app.bsky.embed.external",
       external: {
-        uri: doc?.sourceUrl ?? viewUrl,
-        title: `${caseName} — ${label || "Filing"}`.trim(),
-        description: truncate(entry.description, 280),
+        uri: hasPdf && doc ? doc.sourceUrl : viewUrl,
+        title: truncate(cardTitle, 120),
+        description: truncate(description, 290),
       },
     },
     labels: BOT_SELF_LABEL,

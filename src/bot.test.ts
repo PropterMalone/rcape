@@ -109,16 +109,18 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     parent: StrongRef;
     text: string;
     facets?: import("./facet.js").MentionFacet[];
+    embed?: unknown;
   }[] = [];
   const seenAts: string[] = [];
   const agent: BotAgent = {
     did: "did:bot",
     graph: allowGraph(["did:alice"]),
     listMentions: async () => mentions,
-    reply: async (parent, _root, text, facets) => {
-      replies.push({ parent, text, facets });
+    reply: async (parent, _root, text, facets, embed) => {
+      replies.push({ parent, text, facets, embed });
       return { uri: `reply-${replies.length}`, cid: `c${replies.length}` };
     },
+    uploadBlob: async () => ({ $type: "blob", ref: "seal" }),
     updateSeen: async (seenAt) => {
       seenAts.push(seenAt);
     },
@@ -376,6 +378,19 @@ describe("pollOnce", () => {
       expect(doneFacet?.features[0]?.$type).toBe(
         "app.bsky.richtext.facet#mention",
       );
+      // The done reply also carries a link card to the case profile (thumb is
+      // wired separately via deps.cardThumb, unset in this test → text card).
+      const card = replies[1]?.embed as {
+        $type: string;
+        external: { uri: string; title: string; thumb?: unknown };
+      };
+      expect(card?.$type).toBe("app.bsky.embed.external");
+      expect(card?.external.uri).toBe(
+        "https://bsky.app/profile/abrego-garcia.rcape.org",
+      );
+      expect(card?.external.title).toBe("Abrego Garcia v. Noem");
+      // ack reply (replies[0]) gets no card.
+      expect(replies[0]?.embed).toBeUndefined();
       const q1 = await loadQueue(queuePath);
       expect(q1.jobs[0]?.status).toBe("done");
       expect(q1.seen.has("m-alice")).toBe(true);

@@ -47,14 +47,18 @@ const entry: DocketEntryRecord = {
   dateFiled: "2025-03-24T00:00:00.000Z",
   description: "COMPLAINT against Kristi Noem et al.",
   documents: [
-    { sourceUrl: "https://storage.courtlistener.com/x.pdf", pageCount: 21 },
+    {
+      sourceUrl: "https://storage.courtlistener.com/x.pdf",
+      pageCount: 21,
+      isAvailable: true,
+    },
   ],
   source: { provider: "courtlistener", retrievedAt: "t" },
   createdAt: "t",
 };
 
 describe("entryToPost", () => {
-  it("stays within 300 graphemes and links the first document", () => {
+  it("renders an available document as a 📄 PDF card linking the storage file", () => {
     const p = entryToPost(
       entry,
       "Abrego Garcia v. Noem",
@@ -63,9 +67,32 @@ describe("entryToPost", () => {
     );
     expect(p.text.length).toBeLessThanOrEqual(300);
     expect(p.text).toContain("Abrego Garcia v. Noem");
+    expect(p.text.startsWith("📄")).toBe(true);
+    // Card links the PDF and tags it as a document with a page count.
     expect(p.embed?.external.uri).toBe(
       "https://storage.courtlistener.com/x.pdf",
     );
+    expect(p.embed?.external.title).toContain("Doc 1");
+    expect(p.embed?.external.description).toContain("21 pp · PDF");
+  });
+
+  it("renders a docket-only entry as a 🗂 card linking the docket page", () => {
+    // A document whose scan CL has NOT gathered (isAvailable false) must NOT be
+    // linked as a PDF — that link can 404. It's a docket entry, not a document.
+    const ungathered = {
+      ...entry,
+      documents: [
+        {
+          sourceUrl: "https://storage.courtlistener.com/x.pdf",
+          isAvailable: false,
+        },
+      ],
+    };
+    const p = entryToPost(ungathered, "Case", "https://view.example", "t");
+    expect(p.text.startsWith("🗂")).toBe(true);
+    expect(p.embed?.external.uri).toBe("https://view.example");
+    expect(p.embed?.external.title).toContain("Docket entry 1");
+    expect(p.embed?.external.description).toContain("docket only");
   });
 
   it("truncates very long descriptions with an ellipsis", () => {
@@ -75,10 +102,11 @@ describe("entryToPost", () => {
     expect(p.text).toContain("…");
   });
 
-  it("falls back to the view URL when an entry has no documents", () => {
+  it("falls back to the docket (view) URL when an entry has no documents", () => {
     const noDocs = { ...entry, documents: undefined };
     const p = entryToPost(noDocs, "Case", "https://view.example", "t");
     expect(p.embed?.external.uri).toBe("https://view.example");
+    expect(p.embed?.external.title).toContain("Docket entry 1");
   });
 });
 
