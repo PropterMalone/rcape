@@ -14,6 +14,7 @@ import {
   markFailed,
   markRetrying,
   markSeen,
+  markThrottled,
   nextDrainable,
   nextQueued,
   perRequesterQueued,
@@ -160,6 +161,54 @@ describe("retry backoff", () => {
     });
     // The retrying job still counts toward its requester's cap.
     expect(perRequesterQueued(q, "did:a")).toBe(1);
+  });
+});
+
+describe("drain fairness (least-throttled-first)", () => {
+  const NOW = Date.parse("2026-05-31T12:00:00.000Z");
+  const due = () => new Date(NOW - 1000).toISOString(); // reopen already elapsed
+
+  it("markThrottled bumps throttleCount without touching retryCount", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = markThrottled(q, 1, due());
+    const j = findJob(q, 1);
+    expect(j?.throttleCount).toBe(1);
+    expect(j?.retryCount).toBeUndefined(); // a closed window is not a fault
+    q = markThrottled(q, 1, due());
+    expect(findJob(q, 1)?.throttleCount).toBe(2);
+  });
+
+  it("prefers the least-throttled drainable job so a big case yields the window", () => {
+    // docket 1 (the J&J-style case) enqueued first AND throttled twice; docket 2
+    // is a fresh small case. Both are drainable, but the fresh one drains first.
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = enq(q, job(2, "did:b"));
+    q = markThrottled(q, 1, due());
+    q = markThrottled(q, 1, due());
+    expect(nextDrainable(q, NOW)?.docketId).toBe(2);
+  });
+
+  it("a fresh queued job outranks a throttled-but-due one regardless of array order", () => {
+    let q = enq(emptyQueue(), job(1, "did:a")); // enqueued first, then throttled
+    q = markThrottled(q, 1, due());
+    q = enq(q, job(2, "did:b")); // enqueued later, fresh
+    expect(nextDrainable(q, NOW)?.docketId).toBe(2);
+  });
+
+  it("resumes the throttled case once no fresher competitor remains (no starvation)", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = markThrottled(q, 1, due());
+    // It's the only drainable job → still selected, so it keeps making progress.
+    expect(nextDrainable(q, NOW)?.docketId).toBe(1);
+  });
+
+  it("breaks ties FIFO when throttle counts are equal (preserves original order)", () => {
+    let q = enq(emptyQueue(), job(1, "did:a"));
+    q = enq(q, job(2, "did:b"));
+    q = markThrottled(q, 1, due());
+    q = markThrottled(q, 2, due());
+    // Equal throttleCount → the earlier-enqueued docket 1 wins.
+    expect(nextDrainable(q, NOW)?.docketId).toBe(1);
   });
 });
 

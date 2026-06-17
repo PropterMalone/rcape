@@ -36,6 +36,12 @@ export interface Job {
   // later daily-deferred ("tomorrow") — both notices must be able to fire, so one
   // flag can't gate both or the second, more-accurate notice is suppressed.
   throttledNotified?: boolean;
+  // How many times this job hit CL's rate window (bumped by markThrottled, NOT a
+  // fault so kept apart from retryCount). nextDrainable prefers the least-throttled
+  // job, so a big docket that keeps re-throttling yields the reopened window to
+  // fresh small cases instead of head-of-line blocking them (J&J blocked 5 cases,
+  // 2026-06-17). The resumable fetch banks the big case's progress between turns.
+  throttleCount?: number;
 }
 
 export interface QueueState {
@@ -116,14 +122,26 @@ export function nextQueued(q: QueueState): Job | undefined {
 // backoff (nextAttemptAt) has elapsed. A retrying job still in its backoff
 // window is SKIPPED, not blocking — a later ready job is returned instead, so a
 // stuck job can't head-of-line block the whole queue.
+//
+// Among the ready jobs, prefer the LEAST-throttled one: a big docket that keeps
+// hitting CL's rate window would otherwise sit at the FIFO head and re-consume
+// every reopened window, starving the small cases behind it (J&J blocked 5 cases,
+// 2026-06-17). Fresh jobs (throttleCount 0) thus drain ahead of a repeatedly-
+// throttled one; ties break FIFO (array order), so with no throttling the
+// original first-ready ordering is unchanged. The throttled case is never starved
+// outright — once no fresher job is ready it is selected again and resumes.
 export function nextDrainable(q: QueueState, now: number): Job | undefined {
-  return q.jobs.find((j) => {
+  const ready = q.jobs.filter((j) => {
     if (j.status === "queued") return true;
-    if (j.status === "retrying") {
+    if (j.status === "retrying")
       return Date.parse(j.nextAttemptAt ?? "") <= now;
-    }
     return false;
   });
+  if (ready.length === 0) return undefined;
+  // reduce keeps the earlier element on ties (strict <), preserving FIFO order.
+  return ready.reduce((best, j) =>
+    (j.throttleCount ?? 0) < (best.throttleCount ?? 0) ? j : best,
+  );
 }
 
 // Patch the ACTIVE job for a docket — the queued/retrying one. A docket can have
@@ -207,7 +225,16 @@ export function markThrottled(
   docketId: number,
   nextAttemptAt: string,
 ): QueueState {
-  return patchJob(q, docketId, { status: "retrying", nextAttemptAt });
+  // Bump throttleCount (off the ACTIVE job, like markRetrying) so nextDrainable
+  // can deprioritize a repeatedly-throttled case. retryCount is untouched — a
+  // closed window is not a fault and must not count toward the failure cap.
+  const job = q.jobs.find((j) => j.docketId === docketId && isActive(j));
+  const throttleCount = (job?.throttleCount ?? 0) + 1;
+  return patchJob(q, docketId, {
+    status: "retrying",
+    nextAttemptAt,
+    throttleCount,
+  });
 }
 
 export function hasSeen(q: QueueState, uri: string): boolean {
