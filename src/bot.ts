@@ -18,7 +18,9 @@ import {
   chargeQuota,
   findCase,
   loadLedger,
+  markTokenThrottled,
   mutateLedger,
+  quotaRemaining,
   selectToken,
 } from "./ledger.js";
 import { parseCaseRef, parseMention } from "./mention.js";
@@ -457,8 +459,13 @@ async function classifyMention(
   // re-mention of a retrying docket fall through to a redundant enqueue attempt.
   const alreadyQueued = queuedJob ? isActive(queuedJob) : false;
   const quotaOk =
-    selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE) !==
-    undefined;
+    selectToken(
+      ledger,
+      deps.cfg.tokens,
+      today(),
+      MIN_QUOTA_FOR_CASE,
+      Date.now(),
+    ) !== undefined;
   const queueAhead = queue.jobs.filter((j) => j.status === "queued").length;
   return classify({
     allowed,
@@ -530,12 +537,31 @@ async function drain(
     // is the bot's own single-writer in-memory authority, so re-reading it per
     // iteration would just re-load what we already hold.
     const ledger = await loadLedger(deps.cfg.ledgerPath);
-    // No token in the pool has room for a whole case → stop draining. The job
-    // stays queued and the next day's drain (fresh budget) resumes it
-    // automatically — no new request needed. Tell the requester once that their
-    // acked case is paused until tomorrow (the flag dedupes across cycles).
-    if (!selectToken(ledger, deps.cfg.tokens, today(), MIN_QUOTA_FOR_CASE)) {
-      queue = await notifyAllDeferred(deps, queue, "deferred");
+    // No usable token → stop draining (the job stays queued and a later drain
+    // resumes it). A token can be unusable for two reasons, with different timing:
+    // genuinely out of daily budget (resumes tomorrow → "deferred") vs. in its
+    // hourly-throttle cooldown (reopens within the day → "throttled"). The cooldown
+    // check (nowMs) also means that once ONE case throttles a token, the rest of
+    // the queue skips it here instead of each re-discovering the throttle with a
+    // wasted 429. quotaRemaining ignores throttling, so budget-present ⇒ the block
+    // is the cooldown, not the cap.
+    if (
+      !selectToken(
+        ledger,
+        deps.cfg.tokens,
+        today(),
+        MIN_QUOTA_FOR_CASE,
+        Date.now(),
+      )
+    ) {
+      const dailyExhausted = !deps.cfg.tokens.some(
+        (t) => quotaRemaining(ledger, today(), t) >= MIN_QUOTA_FOR_CASE,
+      );
+      queue = await notifyAllDeferred(
+        deps,
+        queue,
+        dailyExhausted ? "deferred" : "throttled",
+      );
       break;
     }
 
@@ -572,10 +598,15 @@ async function drain(
       // its reopening WITHOUT bumping retryCount (a closed window must not count
       // toward the failure cap), tell everyone waiting once, and stop this cycle.
       // The next 60s poll retries once the window is due to reopen.
-      const nextAt = new Date(
-        Date.now() + Math.min(result.retryAfterMs, MAX_THROTTLE_BACKOFF_MS),
-      ).toISOString();
-      queue = markThrottled(queue, job.docketId, nextAt);
+      const untilMs =
+        Date.now() + Math.min(result.retryAfterMs, MAX_THROTTLE_BACKOFF_MS);
+      const until = new Date(untilMs).toISOString();
+      queue = markThrottled(queue, job.docketId, until);
+      // Cool down the WHOLE token (50/hr is per-token), so the rest of the queue
+      // skips it at the gate above instead of each burning a 429 to rediscover it.
+      await mutateLedger(deps.cfg.ledgerPath, (l) =>
+        markTokenThrottled(l, result.token, until),
+      );
       await persistQueue(deps.queuePath, queue);
       queue = await notifyAllDeferred(deps, queue, "throttled");
       break;

@@ -9,7 +9,9 @@ import {
   chargeQuota,
   emptyLedger,
   findCase,
+  isThrottled,
   loadLedger,
+  markTokenThrottled,
   quotaRemaining,
   recordCase,
   saveLedger,
@@ -254,6 +256,36 @@ describe("token pool (per-token quota + selection)", () => {
     l = chargeQuota(l, 120, DAY, "token-a");
     l = chargeQuota(l, 120, DAY, "token-b");
     expect(selectToken(l, ["token-a", "token-b"], DAY, 17)).toBeUndefined();
+  });
+
+  it("selectToken skips a throttled token (with nowMs) but uses it after the cooldown", () => {
+    const now = 1_000_000;
+    let l: Ledger = emptyLedger(); // both tokens fully funded
+    l = markTokenThrottled(l, "token-a", new Date(now + 60_000).toISOString());
+    // token-a funded but cooling down → token-b is chosen.
+    expect(selectToken(l, ["token-a", "token-b"], DAY, 17, now)).toBe(
+      "token-b",
+    );
+    // After the cooldown elapses, token-a is eligible again (first in list).
+    expect(selectToken(l, ["token-a", "token-b"], DAY, 17, now + 61_000)).toBe(
+      "token-a",
+    );
+    // Single throttled token + nowMs → none qualifies.
+    expect(selectToken(l, ["token-a"], DAY, 17, now)).toBeUndefined();
+    // Omitting nowMs ignores throttling entirely (legacy callers).
+    expect(selectToken(l, ["token-a"], DAY, 17)).toBe("token-a");
+  });
+
+  it("isThrottled reflects the cooldown window", () => {
+    const now = 1_000_000;
+    const l = markTokenThrottled(
+      emptyLedger(),
+      "token-a",
+      new Date(now + 30_000).toISOString(),
+    );
+    expect(isThrottled(l, "token-a", now)).toBe(true);
+    expect(isThrottled(l, "token-a", now + 31_000)).toBe(false);
+    expect(isThrottled(l, "token-b", now)).toBe(false); // never throttled
   });
 
   it("drops a stale (older-day) charge instead of wiping the newer day's counters", () => {

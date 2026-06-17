@@ -788,6 +788,50 @@ describe("rate-limit throttling", () => {
     root: { uri: "m-alice-b", cid: "cb" },
   });
 
+  it("after one case throttles the token, the next cycle skips the rest at the gate (no per-case 429 burn)", async () => {
+    vi.useFakeTimers();
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger()); // full daily budget
+      const { agent, replies } = mockAgent([aliceMention(), aliceDocketB()]);
+      let attempts = 0;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => {
+          attempts++;
+          return { status: "throttled", retryAfterMs: 60_000, token: "t" };
+        },
+      };
+
+      // Cycle 1: job A is attempted, throttles, and cools down token "t" pool-wide.
+      await pollOnce(deps);
+      expect(attempts).toBe(1);
+      // The token was cooled down pool-wide (persisted in the ledger).
+      const cooled = (await loadLedger(ledgerPath)).throttledUntil ?? {};
+      expect(Object.values(cooled)).toHaveLength(1);
+
+      // Cycle 2 (5s later, before the 60s cooldown): job B is drainable, but the
+      // gate sees the token cooling down and STOPS — without the fix, B would burn
+      // a second 429. attempts must stay 1.
+      vi.advanceTimersByTime(5_000);
+      await pollOnce(deps);
+      expect(attempts).toBe(1);
+      // Daily budget is full, so the pause is reported as a throttle, not "tomorrow".
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        false,
+      );
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a throttled provision stops drain, reschedules without a fault, and notifies EVERY waiting requester", async () => {
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
@@ -805,7 +849,7 @@ describe("rate-limit throttling", () => {
         queuePath,
         provision: async (): Promise<ProvisionResult> => {
           attempts++;
-          return { status: "throttled", retryAfterMs: 5_000 };
+          return { status: "throttled", retryAfterMs: 5_000, token: "t" };
         },
       };
 
@@ -861,6 +905,7 @@ describe("rate-limit throttling", () => {
         provision: async (): Promise<ProvisionResult> => ({
           status: "throttled",
           retryAfterMs: 5_000,
+          token: "t",
         }),
       };
 
@@ -911,7 +956,7 @@ describe("rate-limit throttling", () => {
           attempts++;
           // Throttled first; the window reopens and the retry succeeds.
           return attempts === 1
-            ? { status: "throttled", retryAfterMs: 5_000 }
+            ? { status: "throttled", retryAfterMs: 5_000, token: "t" }
             : provisionStub();
         },
       };

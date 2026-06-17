@@ -40,6 +40,12 @@ export interface Ledger {
   // so a pool of N tokens gives N independent daily budgets. `counts` is keyed
   // by a non-secret token fingerprint (tokenId); all counters reset on a new day.
   quota: { day: string; counts: Record<string, number> };
+  // Per-token hourly-throttle cooldown: ISO timestamp until which a token should
+  // not be used, keyed by tokenId. Set when a provision hits CL's 50/hr window
+  // (which, unlike the daily cap, does NOT reset at the UTC day boundary), so the
+  // drain doesn't re-discover the same throttle one queued case at a time. Stale
+  // (past) entries are ignored, so they need no cleanup.
+  throttledUntil?: Record<string, string>;
 }
 
 // CourtListener free tier: 125 requests/day per token.
@@ -159,17 +165,46 @@ export function chargeQuota(
   return ledger;
 }
 
-// Pick the first configured token with at least `need` requests left today, or
-// undefined when every token is exhausted. A single case must run end-to-end on
-// ONE token (CL pagination carries the token), so headroom can't be pooled
-// across tokens — we need one token that can cover the whole case.
+// True when `token` is inside its hourly-throttle cooldown at `nowMs`.
+export function isThrottled(
+  ledger: Ledger,
+  token: string,
+  nowMs: number,
+): boolean {
+  const until = ledger.throttledUntil?.[tokenId(token)];
+  return until !== undefined && Date.parse(until) > nowMs;
+}
+
+// Mark a token throttled until `untilISO` (keyed by the non-secret tokenId).
+export function markTokenThrottled(
+  ledger: Ledger,
+  token: string,
+  untilISO: string,
+): Ledger {
+  return {
+    ...ledger,
+    throttledUntil: { ...ledger.throttledUntil, [tokenId(token)]: untilISO },
+  };
+}
+
+// Pick the first configured token with at least `need` requests left today AND
+// not in a hourly-throttle cooldown, or undefined when none qualifies. A single
+// case must run end-to-end on ONE token (CL pagination carries the token), so
+// headroom can't be pooled across tokens — we need one token that can cover the
+// whole case. Pass `nowMs` to honor the throttle cooldown; omit it (legacy
+// callers/tests that don't model throttling) to consider quota only.
 export function selectToken(
   ledger: Ledger,
   tokens: string[],
   day: string,
   need: number,
+  nowMs?: number,
 ): string | undefined {
-  return tokens.find((t) => quotaRemaining(ledger, day, t) >= need);
+  return tokens.find(
+    (t) =>
+      quotaRemaining(ledger, day, t) >= need &&
+      (nowMs === undefined || !isThrottled(ledger, t, nowMs)),
+  );
 }
 
 function normalizeQuota(q: {
@@ -187,10 +222,15 @@ function normalizeQuota(q: {
 }
 
 function normalize(parsed: Partial<Ledger>): Ledger {
-  return {
+  const out: Ledger = {
     cases: parsed.cases ?? {},
     quota: normalizeQuota(parsed.quota ?? {}),
   };
+  // Carry the per-token throttle cooldowns through load/mutate (omitted when
+  // absent so legacy ledgers don't grow an empty key). Stale entries are ignored
+  // at read time (isThrottled), so no expiry pass is needed here.
+  if (parsed.throttledUntil) out.throttledUntil = parsed.throttledUntil;
+  return out;
 }
 
 export async function loadLedger(path: string): Promise<Ledger> {

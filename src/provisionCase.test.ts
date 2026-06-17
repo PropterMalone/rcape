@@ -93,7 +93,11 @@ describe("runProvision incremental quota", () => {
         throw new ThrottledError(800_000);
       },
     });
-    expect(result).toEqual({ status: "throttled", retryAfterMs: 800_000 });
+    expect(result).toEqual({
+      status: "throttled",
+      retryAfterMs: 800_000,
+      token: "t",
+    });
 
     // The reservation reconciled to the real spend — no quota leak on a throttle.
     const ledger = await loadLedger(ledgerPath);

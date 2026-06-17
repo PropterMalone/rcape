@@ -106,8 +106,10 @@ export type ProvisionResult =
   | { status: "quota-exhausted"; day: string }
   // CourtListener's hourly/daily rate window is closed mid-fetch. Distinct from a
   // fault: the case isn't broken, the limit just isn't open. retryAfterMs is the
-  // server-reported cooldown so the caller can reschedule near its reopening.
-  | { status: "throttled"; retryAfterMs: number }
+  // server-reported cooldown so the caller can reschedule near its reopening;
+  // `token` is the one that throttled, so the caller can cool down that token
+  // pool-wide (a 50/hr cap is per-token) instead of re-discovering it per case.
+  | { status: "throttled"; retryAfterMs: number; token: string }
   | { status: "not-found" }
   | { status: "error"; message: string };
 
@@ -271,7 +273,7 @@ export async function runProvision(
       token,
     );
     if (e instanceof ThrottledError) {
-      return { status: "throttled", retryAfterMs: e.retryAfterMs };
+      return { status: "throttled", retryAfterMs: e.retryAfterMs, token };
     }
     const msg = e instanceof Error ? e.message : String(e);
     if (/CourtListener 404/.test(msg)) return { status: "not-found" };
