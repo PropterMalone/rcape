@@ -134,6 +134,59 @@ describe("resumable pagination", () => {
   });
 });
 
+describe("fetchDocketEntriesSince (incremental, DESC + early-stop)", () => {
+  const CL = "https://www.courtlistener.com/api/rest/v4";
+
+  it("returns only entries newer than the water line and stops at the first old one", async () => {
+    const seen: string[] = [];
+    let page = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      page += 1;
+      if (page === 1) {
+        return res(200, {
+          results: [
+            { id: 8, recap_sequence_number: "2025-01-08.001" },
+            { id: 7, recap_sequence_number: "2025-01-07.001" },
+            { id: 4, recap_sequence_number: "2025-01-04.001" }, // ≤ water → stop
+          ],
+          next: `${CL}/docket-entries/?cursor=p2`,
+        });
+      }
+      return res(200, {
+        results: [{ id: 1, recap_sequence_number: "2025-01-01.001" }],
+        next: null,
+      });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.fetchDocketEntriesSince(123, "2025-01-05.001");
+    expect(out.map((e) => e.id)).toEqual([8, 7]); // 04 excluded (≤ water)
+    expect(seen).toHaveLength(1); // early-stopped: page 2 never fetched
+    expect(seen[0]).toContain("order_by=-recap_sequence_number"); // descending
+  });
+
+  it("pays just one call and returns nothing when the docket has no new filings", async () => {
+    const fetchImpl = vi.fn(async () =>
+      res(200, {
+        results: [{ id: 3, recap_sequence_number: "2025-01-03.001" }],
+        next: `${CL}/docket-entries/?cursor=p2`,
+      }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const out = await client.fetchDocketEntriesSince(123, "2025-06-01.001");
+    expect(out).toEqual([]);
+    expect(client.requestCount).toBe(1); // first page already past the water line
+  });
+});
+
 describe("429 handling", () => {
   it("throws ThrottledError without sleeping when the cooldown exceeds the cap", async () => {
     // The hourly/daily window: an 800s cooldown would freeze the drain loop. It

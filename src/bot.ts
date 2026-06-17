@@ -28,6 +28,7 @@ import {
   throttledUntilMs,
 } from "./ledger.js";
 import { parseCaseRef, parseMention } from "./mention.js";
+import { monitorOnce } from "./monitor.js";
 import {
   type ProvisionConfig,
   type ProvisionResult,
@@ -377,6 +378,16 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
   }
 
   await drain(deps, provision);
+
+  // After draining the provision queue, re-check a few already-shelved cases for
+  // new filings and append them (makes "follow for new filings" true). Self-gated
+  // by cadence + budget, so most cycles are a cheap no-op. Best-effort: a monitor
+  // failure must never abort the poll cycle.
+  try {
+    await monitorOnce(deps);
+  } catch (e) {
+    console.error("monitor cycle failed:", e instanceof Error ? e.message : e);
+  }
 }
 
 async function classifyMention(

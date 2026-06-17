@@ -239,4 +239,40 @@ export class CourtListenerClient {
   async getAllParties(docketId: number): Promise<ClParty[]> {
     return (await this.fetchParties(docketId)).results;
   }
+
+  // Fetch ONLY docket entries newer than `sinceSeq` (a recap_sequence_number
+  // high-water), newest-first via descending order with early-stop: as soon as a
+  // page yields an entry at or below the water line, every later entry is older
+  // too, so we stop. The watched-case monitor therefore pays ~1 CL call when a
+  // docket has nothing new (the common case) instead of re-paging the whole
+  // docket. Entries with no sequence number are skipped (can't be ordered) but
+  // don't trigger the stop. Returned newest-first.
+  async fetchDocketEntriesSince(
+    docketId: number,
+    sinceSeq: string,
+  ): Promise<ClDocketEntry[]> {
+    const out: ClDocketEntry[] = [];
+    let next: string | null =
+      `/docket-entries/?docket=${docketId}&page_size=100&order_by=-recap_sequence_number`;
+    let pages = 0;
+    while (next && pages < MAX_PAGES) {
+      const page: ClPage<ClDocketEntry> =
+        await this.get<ClPage<ClDocketEntry>>(next);
+      let reachedOld = false;
+      for (const e of page.results) {
+        const seq = e.recap_sequence_number;
+        if (seq == null) continue; // unorderable — skip, but keep scanning
+        if (seq.localeCompare(sinceSeq) > 0) {
+          out.push(e); // strictly newer than the water line
+        } else {
+          reachedOld = true; // ≤ water line → all remaining are older
+          break;
+        }
+      }
+      if (reachedOld) break;
+      next = page.next;
+      pages += 1;
+    }
+    return out;
+  }
 }
