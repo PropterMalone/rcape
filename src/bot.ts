@@ -15,6 +15,7 @@ import type { ClSearchPage } from "./courtlistener.types.js";
 import { type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
 import {
+  type Ledger,
   chargeQuota,
   findCase,
   loadLedger,
@@ -22,6 +23,7 @@ import {
   mutateLedger,
   quotaRemaining,
   selectToken,
+  throttledUntilMs,
 } from "./ledger.js";
 import { parseCaseRef, parseMention } from "./mention.js";
 import {
@@ -67,11 +69,18 @@ import {
 // off-quota), so the old 20 stranded ~a case worth of daily headroom; the
 // graceful throttle handling backstops a rare bigger docket.
 const MIN_QUOTA_FOR_CASE = 12;
-// Cap on how far out a rate-throttled job is rescheduled. CourtListener reports
-// the cooldown ("available in N seconds"); we honor it but clamp to 1h so a
-// pathological value can't park a job indefinitely. The hourly window's real
-// cooldown is well under this, so a throttled case retries near its reopening.
-const MAX_THROTTLE_BACKOFF_MS = 3_600_000;
+// CourtListener's retry-after is the AUTHORITY on when we may call again — our
+// own day-counter resets on the calendar day, but CL enforces a rolling window,
+// so the counter can read "budget left" while CL has us locked (the 2026-06-16
+// thrash: we reset at 8pm ET, declared ourselves full of quota, and banged on an
+// already-spent limit). So honor CL's value directly and only clamp to a 25h
+// sanity ceiling against a pathological header — NOT down to an hour, which
+// turned a 10h daily lock into hourly re-attempts that never cleared.
+const MAX_THROTTLE_BACKOFF_MS = 25 * 3_600_000;
+// A cooldown longer than this is CL's daily window, not the 50/hr one: the
+// requester hears "tomorrow" (deferred), not "hang tight" (throttled). Keyed off
+// CL's reported cooldown, so it's right even when our day-counter disagrees.
+const THROTTLE_HOURLY_CEILING_MS = 3_600_000;
 // Max in-flight (queued/retrying) requests per requester. Bounds how much of the
 // shared daily budget any single allowlisted account can reserve at once (3 ×
 // ~17 = ~51 calls), so one user can't monopolize the queue or the quota.
@@ -511,6 +520,30 @@ async function notifyAllDeferred(
   return q;
 }
 
+// When no token can start a case, decide what waiting requesters hear. Genuinely
+// out of daily budget anywhere ⇒ "tomorrow". Otherwise every budgeted token is in
+// a cooldown: if the soonest reopens within the hour it's the 50/hr window ("hang
+// tight"); if it's further out it's CL's daily window outlasting our calendar-day
+// counter, so still "tomorrow". Honoring CL's reopen time here is what stops the
+// bot promising "hang tight" against a 10h lock (2026-06-16).
+function classifyDeferral(
+  ledger: Ledger,
+  tokens: string[],
+  day: string,
+  nowMs: number,
+): "deferred" | "throttled" {
+  const budgeted = tokens.filter(
+    (t) => quotaRemaining(ledger, day, t) >= MIN_QUOTA_FOR_CASE,
+  );
+  if (budgeted.length === 0) return "deferred";
+  const soonestReopen = Math.min(
+    ...budgeted.map((t) => throttledUntilMs(ledger, t, nowMs) ?? nowMs),
+  );
+  return soonestReopen - nowMs > THROTTLE_HOURLY_CEILING_MS
+    ? "deferred"
+    : "throttled";
+}
+
 async function drain(
   deps: BotDeps,
   provision: (id: number, cfg: ProvisionConfig) => Promise<ProvisionResult>,
@@ -539,12 +572,12 @@ async function drain(
     const ledger = await loadLedger(deps.cfg.ledgerPath);
     // No usable token → stop draining (the job stays queued and a later drain
     // resumes it). A token can be unusable for two reasons, with different timing:
-    // genuinely out of daily budget (resumes tomorrow → "deferred") vs. in its
-    // hourly-throttle cooldown (reopens within the day → "throttled"). The cooldown
-    // check (nowMs) also means that once ONE case throttles a token, the rest of
-    // the queue skips it here instead of each re-discovering the throttle with a
-    // wasted 429. quotaRemaining ignores throttling, so budget-present ⇒ the block
-    // is the cooldown, not the cap.
+    // genuinely out of daily budget (resumes tomorrow → "deferred") vs. in a
+    // throttle cooldown. The cooldown check (nowMs) also means that once ONE case
+    // throttles a token, the rest of the queue skips it here instead of each
+    // re-discovering the throttle with a wasted 429. classifyDeferral keys the
+    // requester notice off CL's reported reopen time, not our day-counter — which
+    // can read "budget left" while CL's rolling window still has us locked.
     if (
       !selectToken(
         ledger,
@@ -554,13 +587,10 @@ async function drain(
         Date.now(),
       )
     ) {
-      const dailyExhausted = !deps.cfg.tokens.some(
-        (t) => quotaRemaining(ledger, today(), t) >= MIN_QUOTA_FOR_CASE,
-      );
       queue = await notifyAllDeferred(
         deps,
         queue,
-        dailyExhausted ? "deferred" : "throttled",
+        classifyDeferral(ledger, deps.cfg.tokens, today(), Date.now()),
       );
       break;
     }
@@ -594,10 +624,12 @@ async function drain(
         queue = markFailed(queue, job.docketId);
       }
     } else if (result.status === "throttled") {
-      // CourtListener's rate window closed mid-fetch. Not a fault: reschedule near
-      // its reopening WITHOUT bumping retryCount (a closed window must not count
-      // toward the failure cap), tell everyone waiting once, and stop this cycle.
-      // The next 60s poll retries once the window is due to reopen.
+      // CourtListener's rate window closed mid-fetch. Not a fault: reschedule at
+      // CL's reported reopening WITHOUT bumping retryCount (a closed window must
+      // not count toward the failure cap), tell everyone waiting once, and stop
+      // this cycle. A short cooldown is the 50/hr window (retries this poll loop);
+      // a long one is the daily window (retries tomorrow) — honor whichever CL
+      // reports instead of forcing an hourly retry against a daily lock.
       const untilMs =
         Date.now() + Math.min(result.retryAfterMs, MAX_THROTTLE_BACKOFF_MS);
       const until = new Date(untilMs).toISOString();
@@ -608,7 +640,12 @@ async function drain(
         markTokenThrottled(l, result.token, until),
       );
       await persistQueue(deps.queuePath, queue);
-      queue = await notifyAllDeferred(deps, queue, "throttled");
+      // "tomorrow" if CL handed us a daily-scale cooldown, else "hang tight".
+      const kind =
+        result.retryAfterMs > THROTTLE_HOURLY_CEILING_MS
+          ? "deferred"
+          : "throttled";
+      queue = await notifyAllDeferred(deps, queue, kind);
       break;
     } else {
       // quota-exhausted mid-provision (a large docket's entry pagination outran
@@ -691,6 +728,7 @@ async function main(): Promise<void> {
     cfToken: env("CLOUDFLARE_API_TOKEN"),
     zoneId: env("CLOUDFLARE_ZONE_ID"),
     ledgerPath: fileURLToPath(new URL("../data/ledger.json", import.meta.url)),
+    cacheDir: fileURLToPath(new URL("../data/case-cache", import.meta.url)),
   };
   const ownerHandle = env("RCAPE_OWNER_HANDLE");
   // Resolve the owner handle to a DID once at startup for the @proptermalone

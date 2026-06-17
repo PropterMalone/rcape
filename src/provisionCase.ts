@@ -9,6 +9,7 @@
 
 import { fileURLToPath } from "node:url";
 import { fetchAndMapCase } from "./build.js";
+import { loadCachedCase, saveCachedCase } from "./caseCache.js";
 import { CaseRepo } from "./caseRepo.js";
 import {
   CourtListenerClient,
@@ -45,6 +46,10 @@ export interface ProvisionConfig {
   cfToken: string;
   zoneId: string;
   ledgerPath: string;
+  // Directory for the fetched-case cache (see caseCache.ts). Optional so the many
+  // test configs don't have to supply it; absent ⇒ caching disabled (every
+  // provision re-fetches), which is the prior behavior.
+  cacheDir?: string;
 }
 
 // REST-counted calls per case = 1 (docket) + ceil(entries/100) + ceil(parties/100);
@@ -238,53 +243,73 @@ export async function runProvision(
   }
 
   const day = new Date().toISOString().slice(0, 10);
-  // Pick a token from the pool with room for a whole case. None → the shared
-  // budget is spent for the day across every token.
-  const token = selectToken(ledger, cfg.tokens, day, RESERVED_CALLS_PER_CASE);
-  if (!token) {
-    return { status: "quota-exhausted", day };
-  }
+  const nowIso = new Date().toISOString();
 
-  const client = (opts.makeClient ?? ((t) => new CourtListenerClient(t)))(
-    token,
-  );
-  const mapCase = opts.mapCase ?? fetchAndMapCase;
+  // Reuse a prior fetch for this docket when one is cached and fresh: a retry or
+  // operator restart then pays ZERO CL calls instead of re-fetching + re-hashing
+  // the whole docket (the re-thrash that spent a day's quota on no provisions,
+  // 2026-06-16). A cache hit needs neither a token nor a quota charge — we make
+  // no CL request at all.
+  let mapped: Awaited<ReturnType<typeof fetchAndMapCase>> | undefined =
+    cfg.cacheDir
+      ? await loadCachedCase(cfg.cacheDir, docketId, Date.parse(nowIso))
+      : undefined;
 
-  // Reserve the expected spend BEFORE the fetch and persist it, so a crash
-  // during pagination can't lose the calls already made to CL. Charged against
-  // the SELECTED token under the lock on a freshly-read ledger so a concurrent
-  // CLI/bot quota write isn't clobbered; reconciled to the real count below.
-  ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
-    chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day, token),
-  );
+  if (!mapped) {
+    // Pick a token from the pool with room for a whole case. None → the shared
+    // budget is spent for the day across every token.
+    const token = selectToken(ledger, cfg.tokens, day, RESERVED_CALLS_PER_CASE);
+    if (!token) {
+      return { status: "quota-exhausted", day };
+    }
 
-  let mapped: Awaited<ReturnType<typeof fetchAndMapCase>>;
-  try {
-    mapped = await mapCase(
-      { docketId, token, hashFirstNEntries: cfg.hashN },
-      client,
+    const client = (opts.makeClient ?? ((t) => new CourtListenerClient(t)))(
+      token,
     );
-  } catch (e) {
-    // Reconcile the reservation to the calls actually spent, then classify.
+    const mapCase = opts.mapCase ?? fetchAndMapCase;
+
+    // Reserve the expected spend BEFORE the fetch and persist it, so a crash
+    // during pagination can't lose the calls already made to CL. Charged against
+    // the SELECTED token under the lock on a freshly-read ledger so a concurrent
+    // CLI/bot quota write isn't clobbered; reconciled to the real count below.
+    ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
+      chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day, token),
+    );
+
+    try {
+      mapped = await mapCase(
+        { docketId, token, hashFirstNEntries: cfg.hashN },
+        client,
+      );
+    } catch (e) {
+      // Reconcile the reservation to the calls actually spent, then classify.
+      ledger = await reconcileQuota(
+        cfg.ledgerPath,
+        client.requestCount,
+        day,
+        token,
+      );
+      if (e instanceof ThrottledError) {
+        return { status: "throttled", retryAfterMs: e.retryAfterMs, token };
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/CourtListener 404/.test(msg)) return { status: "not-found" };
+      return { status: "error", message: msg };
+    }
     ledger = await reconcileQuota(
       cfg.ledgerPath,
       client.requestCount,
       day,
       token,
     );
-    if (e instanceof ThrottledError) {
-      return { status: "throttled", retryAfterMs: e.retryAfterMs, token };
+
+    // Persist the successful fetch BEFORE the PDS/DNS/backfill work below (which
+    // can still throw and bounce the job to a retry). The retry then reuses this
+    // instead of re-spending CL quota on a docket we already have.
+    if (cfg.cacheDir) {
+      await saveCachedCase(cfg.cacheDir, docketId, mapped, nowIso);
     }
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/CourtListener 404/.test(msg)) return { status: "not-found" };
-    return { status: "error", message: msg };
   }
-  ledger = await reconcileQuota(
-    cfg.ledgerPath,
-    client.requestCount,
-    day,
-    token,
-  );
 
   // A resume reuses the stored handle; minting fresh derives a new one that
   // avoids every spoken-for handle (live + superseded).
@@ -471,6 +496,7 @@ async function main(): Promise<void> {
     cfToken: dryRun ? "" : requireEnv("CLOUDFLARE_API_TOKEN"),
     zoneId: dryRun ? "" : requireEnv("CLOUDFLARE_ZONE_ID"),
     ledgerPath: ledgerPath(),
+    cacheDir: fileURLToPath(new URL("../data/case-cache", import.meta.url)),
   };
 
   console.log(`Provisioning docket ${docketId}…`);

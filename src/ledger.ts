@@ -181,6 +181,22 @@ export function isThrottled(
   return until !== undefined && Date.parse(until) > nowMs;
 }
 
+// The instant a throttled token reopens (ms epoch), or undefined when the token
+// carries no live cooldown. Lets the drain classify the requester notice by how
+// far out the reopen is — a far-future cooldown is CL's daily window ("tomorrow")
+// even when our own day-counter still shows budget, the exact mismatch that let
+// the bot thrash an already-spent limit on 2026-06-16.
+export function throttledUntilMs(
+  ledger: Ledger,
+  token: string,
+  nowMs: number,
+): number | undefined {
+  const until = ledger.throttledUntil?.[tokenId(token)];
+  if (until === undefined) return undefined;
+  const ms = Date.parse(until);
+  return ms > nowMs ? ms : undefined;
+}
+
 // Mark a token throttled until `untilISO` (keyed by the non-secret tokenId).
 export function markTokenThrottled(
   ledger: Ledger,

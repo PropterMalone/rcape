@@ -887,6 +887,51 @@ describe("rate-limit throttling", () => {
     }
   });
 
+  it("a daily-scale throttle (long retry-after) tells requesters TOMORROW and honors CL's full cooldown, not a 1h cap", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const { agent, replies } = mockAgent([aliceMention()]);
+
+      // CourtListener's rolling daily window is closed: it reports a ~10h cooldown
+      // even though our day-counter still shows budget. The bot must believe CL.
+      const tenHoursMs = 10 * 60 * 60 * 1000;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: async (): Promise<ProvisionResult> => ({
+          status: "throttled",
+          retryAfterMs: tenHoursMs,
+          token: "t",
+        }),
+      };
+
+      await pollOnce(deps);
+
+      // Requester hears "tomorrow", NOT the hourly "hang tight" — a 10h lock is the
+      // daily window, classified off CL's reported cooldown not our day-counter.
+      expect(replies.some((r) => r.text.includes("finish it tomorrow"))).toBe(
+        true,
+      );
+      expect(
+        replies.some((r) => r.text.toLowerCase().includes("hang tight")),
+      ).toBe(false);
+
+      // The token cooldown reflects CL's real ~10h reopen, not a capped 1h — so the
+      // bot sleeps until the window actually reopens instead of banging hourly.
+      const cooled = (await loadLedger(ledgerPath)).throttledUntil ?? {};
+      const untilMs = Date.parse(Object.values(cooled)[0] ?? "");
+      expect(untilMs - Date.now()).toBeGreaterThan(2 * 60 * 60 * 1000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a throttle notice does NOT suppress a later daily-deferred notice (separate flags)", async () => {
     vi.useFakeTimers();
     const { pollOnce } = await import("./bot.js");

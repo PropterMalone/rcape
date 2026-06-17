@@ -132,6 +132,64 @@ describe("runProvision incremental quota", () => {
   });
 });
 
+describe("runProvision fetch cache", () => {
+  const sampleMapCase = () =>
+    vi.fn(
+      async () =>
+        ({
+          docketRecord: { caseName: "Doe v. Roe", docketNumber: "1:23-cv-1" },
+          entryRecords: [],
+          parties: [],
+          records: [],
+        }) as unknown as MappedCase,
+    );
+
+  it("reuses a cached fetch on the next provision — no second CL fetch, no extra quota", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(ledgerPath, emptyLedger());
+    const c = { ...cfg(ledgerPath), cacheDir: join(dir, "cache") };
+    const mapCase = sampleMapCase();
+
+    const first = await runProvision(123, c, {
+      dryRun: true,
+      makeClient: () => clientWithCount(8),
+      mapCase: mapCase as never,
+    });
+    expect(first.status).toBe("dry-run");
+    expect(mapCase).toHaveBeenCalledTimes(1);
+    expect((await loadLedger(ledgerPath)).quota.counts[tokenId("t")] ?? 0).toBe(
+      8,
+    );
+
+    // Same docket again: served from cache. The client would charge 99 calls if a
+    // fetch happened — proving the second run made none.
+    const second = await runProvision(123, c, {
+      dryRun: true,
+      makeClient: () => clientWithCount(99),
+      mapCase: mapCase as never,
+    });
+    expect(second.status).toBe("dry-run");
+    expect(mapCase).toHaveBeenCalledTimes(1); // not re-fetched
+    expect((await loadLedger(ledgerPath)).quota.counts[tokenId("t")] ?? 0).toBe(
+      8, // unchanged — no fetch, no charge
+    );
+  });
+
+  it("re-fetches every time when no cacheDir is set (caching is opt-in)", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(ledgerPath, emptyLedger());
+    const mapCase = sampleMapCase();
+    for (let i = 0; i < 2; i++) {
+      await runProvision(123, cfg(ledgerPath), {
+        dryRun: true,
+        makeClient: () => clientWithCount(5),
+        mapCase: mapCase as never,
+      });
+    }
+    expect(mapCase).toHaveBeenCalledTimes(2);
+  });
+});
+
 function mockRepo(overrides: Partial<Record<string, unknown>> = {}): CaseRepo {
   return {
     did: "did:plc:zombie",
