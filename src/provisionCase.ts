@@ -9,7 +9,14 @@
 
 import { fileURLToPath } from "node:url";
 import { fetchAndMapCase } from "./build.js";
-import { loadCachedCase, saveCachedCase } from "./caseCache.js";
+import {
+  type FetchCheckpoint,
+  clearCheckpoint,
+  loadCachedCase,
+  loadCheckpoint,
+  saveCachedCase,
+  saveCheckpoint,
+} from "./caseCache.js";
 import { CaseRepo } from "./caseRepo.js";
 import {
   CourtListenerClient,
@@ -71,6 +78,10 @@ type MakeClient = (token: string) => CourtListenerClient;
 type MapCase = (
   opts: { docketId: number; token: string; hashFirstNEntries: number },
   client: CourtListenerClient,
+  resume?: {
+    checkpoint?: FetchCheckpoint;
+    onProgress?: (cp: FetchCheckpoint) => Promise<void>;
+  },
 ) => ReturnType<typeof fetchAndMapCase>;
 type MakeAccount = (opts: {
   host?: string;
@@ -290,10 +301,33 @@ export async function runProvision(
     );
     const mapCase = opts.mapCase ?? fetchAndMapCase;
 
+    // Resume a fetch interrupted by an earlier window's throttle: the checkpoint
+    // holds the pages already fetched + the cursor to continue from, so a big
+    // docket advances each window instead of restarting at page 1 (the head-of-
+    // line freeze of 2026-06-17). onProgress checkpoints after every page, so the
+    // ThrottledError below propagates with durable progress already saved.
+    const checkpoint = cfg.cacheDir
+      ? await loadCheckpoint(cfg.cacheDir, docketId, Date.parse(nowIso))
+      : undefined;
+    const resume = cfg.cacheDir
+      ? {
+          checkpoint,
+          onProgress: (cp: FetchCheckpoint) =>
+            saveCheckpoint(
+              cfg.cacheDir as string,
+              docketId,
+              cp,
+              new Date().toISOString(),
+            ),
+        }
+      : undefined;
+
     // Reserve the expected spend BEFORE the fetch and persist it, so a crash
     // during pagination can't lose the calls already made to CL. Charged against
     // the SELECTED token under the lock on a freshly-read ledger so a concurrent
     // CLI/bot quota write isn't clobbered; reconciled to the real count below.
+    // With resume, this is a per-WINDOW reservation (each window charges only the
+    // pages it fetches to whichever token ran it; the cursor carries no token).
     ledger = await mutateLedger(cfg.ledgerPath, (fresh) =>
       chargeQuota(fresh, RESERVED_CALLS_PER_CASE, day, token),
     );
@@ -302,6 +336,7 @@ export async function runProvision(
       mapped = await mapCase(
         { docketId, token, hashFirstNEntries: cfg.hashN },
         client,
+        resume,
       );
     } catch (e) {
       // Reconcile the reservation to the calls actually spent, then classify.
@@ -312,10 +347,15 @@ export async function runProvision(
         token,
       );
       if (e instanceof ThrottledError) {
+        // Checkpoint already persisted by onProgress — the next window resumes.
         return { status: "throttled", retryAfterMs: e.retryAfterMs, token };
       }
       const msg = e instanceof Error ? e.message : String(e);
-      if (/CourtListener 404/.test(msg)) return { status: "not-found" };
+      if (/CourtListener 404/.test(msg)) {
+        // Vanished docket — drop its checkpoint so it doesn't linger to TTL.
+        if (cfg.cacheDir) await clearCheckpoint(cfg.cacheDir, docketId);
+        return { status: "not-found" };
+      }
       return { status: "error", message: msg };
     }
     ledger = await reconcileQuota(
@@ -327,9 +367,12 @@ export async function runProvision(
 
     // Persist the successful fetch BEFORE the PDS/DNS/backfill work below (which
     // can still throw and bounce the job to a retry). The retry then reuses this
-    // instead of re-spending CL quota on a docket we already have.
+    // instead of re-spending CL quota on a docket we already have. Clear the
+    // partial checkpoint AFTER the complete cache is durable (a crash between is
+    // harmless — the checkpoint just re-resumes into the now-present cache).
     if (cfg.cacheDir) {
       await saveCachedCase(cfg.cacheDir, docketId, mapped, nowIso);
+      await clearCheckpoint(cfg.cacheDir, docketId);
     }
   }
 

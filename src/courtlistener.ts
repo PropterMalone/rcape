@@ -58,6 +58,13 @@ export class ThrottledError extends Error {
   }
 }
 
+// Options for resumable pagination. `resumeFrom` (a saved `next` cursor) starts
+// mid-list; `onPage` observes each page so the caller can checkpoint progress.
+export interface PageOpts<T> {
+  resumeFrom?: string | null;
+  onPage?: (results: T[], next: string | null) => Promise<void>;
+}
+
 export class CourtListenerClient {
   private lastRequestAt = 0;
   private _requestCount = 0;
@@ -177,28 +184,59 @@ export class CourtListenerClient {
     return { count, results: page.results };
   }
 
-  private async getAllPages<T>(firstPath: string): Promise<T[]> {
+  // Resumable, observable pagination. `resumeFrom` starts at a saved `next` cursor
+  // (an absolute CL URL from a prior page — flows through get()'s origin pin like
+  // any other) instead of the first path; `onPage` fires after each page with that
+  // page's results and the post-page cursor, so a caller can checkpoint progress.
+  // Returns the post-loop `next`: NULL means the list is exhausted, NON-NULL means
+  // MAX_PAGES was hit this call — a per-WINDOW politeness cap, not a per-case
+  // total. A resumed call continues past it, so a big docket is no longer capped
+  // at MAX_PAGES*page_size entries.
+  private async getAllPages<T>(
+    firstPath: string,
+    opts: PageOpts<T> = {},
+  ): Promise<{ results: T[]; next: string | null }> {
     const out: T[] = [];
-    let next: string | null = firstPath;
+    let next: string | null =
+      opts.resumeFrom !== undefined ? opts.resumeFrom : firstPath;
     let pages = 0;
     while (next && pages < MAX_PAGES) {
       const page: ClPage<T> = await this.get<ClPage<T>>(next);
       out.push(...page.results);
       next = page.next;
       pages += 1;
+      await opts.onPage?.(page.results, next);
     }
-    return out;
+    return { results: out, next };
   }
 
-  getAllDocketEntries(docketId: number): Promise<ClDocketEntry[]> {
+  // Resumable entry/party fetch (used by the checkpointed provisioner). The
+  // returned `next` is the resume cursor for the next window (null = complete).
+  fetchDocketEntries(
+    docketId: number,
+    opts?: PageOpts<ClDocketEntry>,
+  ): Promise<{ results: ClDocketEntry[]; next: string | null }> {
     return this.getAllPages<ClDocketEntry>(
       `/docket-entries/?docket=${docketId}&page_size=100&order_by=recap_sequence_number`,
+      opts,
+    );
+  }
+  fetchParties(
+    docketId: number,
+    opts?: PageOpts<ClParty>,
+  ): Promise<{ results: ClParty[]; next: string | null }> {
+    return this.getAllPages<ClParty>(
+      `/parties/?docket=${docketId}&page_size=100`,
+      opts,
     );
   }
 
-  getAllParties(docketId: number): Promise<ClParty[]> {
-    return this.getAllPages<ClParty>(
-      `/parties/?docket=${docketId}&page_size=100`,
-    );
+  // Non-resumable shims: fetch every page in one shot (the offline CAR builder and
+  // tests that don't model windowing). A small docket fits well under MAX_PAGES.
+  async getAllDocketEntries(docketId: number): Promise<ClDocketEntry[]> {
+    return (await this.fetchDocketEntries(docketId)).results;
+  }
+  async getAllParties(docketId: number): Promise<ClParty[]> {
+    return (await this.fetchParties(docketId)).results;
   }
 }

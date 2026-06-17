@@ -60,6 +60,80 @@ describe("CourtListenerClient pagination SSRF guard", () => {
   });
 });
 
+describe("resumable pagination", () => {
+  const CL = "https://www.courtlistener.com/api/rest/v4";
+
+  it("resumeFrom starts at the saved cursor, not page 1", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      return res(200, { results: [{ a: 1 }], next: null });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const cursor = `${CL}/docket-entries/?docket=123&cursor=PAGE3`;
+    const { results, next } = await client.fetchDocketEntries(123, {
+      resumeFrom: cursor,
+    });
+    expect(seen[0]).toBe(cursor); // jumped straight to the cursor
+    expect(seen.some((u) => u.includes("page_size=100"))).toBe(false);
+    expect(results).toHaveLength(1);
+    expect(next).toBeNull();
+  });
+
+  it("onPage fires per page in order with the post-page cursor; final next is null", async () => {
+    let page = 0;
+    const fetchImpl = vi.fn(async () => {
+      page += 1;
+      return page === 1
+        ? res(200, {
+            results: [{ a: 1 }],
+            next: `${CL}/docket-entries/?cursor=p2`,
+          })
+        : res(200, { results: [{ a: 2 }], next: null });
+    });
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const calls: Array<{ n: number; next: string | null }> = [];
+    const { results, next } = await client.fetchDocketEntries(123, {
+      onPage: async (r, nx) => {
+        calls.push({ n: r.length, next: nx });
+      },
+    });
+    expect(calls).toEqual([
+      { n: 1, next: `${CL}/docket-entries/?cursor=p2` },
+      { n: 1, next: null },
+    ]);
+    expect(results).toHaveLength(2);
+    expect(next).toBeNull();
+  });
+
+  it("returns a non-null next when MAX_PAGES (50) is hit — the per-window cap", async () => {
+    // Every page advertises another, so the loop stops at MAX_PAGES with work left.
+    const fetchImpl = vi.fn(async () =>
+      res(200, {
+        results: [{ a: 1 }],
+        next: `${CL}/docket-entries/?cursor=more`,
+      }),
+    );
+    const client = new CourtListenerClient(
+      "t",
+      fetchImpl as unknown as typeof fetch,
+      0,
+    );
+    const { results, next } = await client.fetchDocketEntries(123);
+    expect(results).toHaveLength(50); // MAX_PAGES
+    expect(next).toBe(`${CL}/docket-entries/?cursor=more`); // resume next window
+    expect(client.requestCount).toBe(50); // counts only this call's pages
+  });
+});
+
 describe("429 handling", () => {
   it("throws ThrottledError without sleeping when the cooldown exceeds the cap", async () => {
     // The hourly/daily window: an 800s cooldown would freeze the drain loop. It

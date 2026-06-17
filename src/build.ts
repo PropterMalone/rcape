@@ -4,7 +4,8 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { CourtListenerClient } from "./courtlistener.js";
+import type { FetchCheckpoint } from "./caseCache.js";
+import { CourtListenerClient, ThrottledError } from "./courtlistener.js";
 import { hashDocuments } from "./hash.js";
 import {
   type DocketEntryRecord,
@@ -42,25 +43,107 @@ export interface MappedCase {
   records: RecordInput[];
 }
 
+// Keep the first occurrence of each `id` — closes the cursor-boundary duplicate
+// window when entry/party pages accumulate across resumed fetch windows.
+function dedupeById<T extends { id: number }>(items: readonly T[]): T[] {
+  const seen = new Set<number>();
+  const out: T[] = [];
+  for (const it of items) {
+    if (seen.has(it.id)) continue;
+    seen.add(it.id);
+    out.push(it);
+  }
+  return out;
+}
+
 // Pull a docket from CourtListener and map it to RC Ape lexicon records. Shared
 // by the offline CAR builder (below) and the on-demand provisioner. Throws if
 // the docket does not exist (CourtListener 404) — callers rely on that to
-// validate a case before provisioning. An optional client lets callers track
-// the CL request count for quota accounting.
+// validate a case before provisioning. An optional client tracks the CL request
+// count for quota accounting.
+//
+// RESUMABLE: pass `resume.checkpoint` to continue a fetch interrupted by a rate
+// throttle, and `resume.onProgress` to persist progress after each page. The
+// fetch advances the checkpoint phase by phase (docket → entries → parties);
+// a ThrottledError propagates AFTER the last good page is checkpointed, so the
+// next window resumes from the cursor instead of restarting at page 1. Hashing +
+// mapping are terminal (run once, only when all CL pages are in) so a big docket
+// completes across windows under a dribbled rate limit.
 export async function fetchAndMapCase(
   opts: MapOptions,
   client: CourtListenerClient = new CourtListenerClient(opts.token),
+  resume?: {
+    checkpoint?: FetchCheckpoint;
+    onProgress?: (cp: FetchCheckpoint) => Promise<void>;
+  },
 ): Promise<MappedCase> {
   const now = new Date().toISOString();
+  const cp: FetchCheckpoint = resume?.checkpoint ?? {
+    savedAt: now,
+    entries: [],
+    entriesNext: null,
+    entriesStarted: false,
+    parties: [],
+    partiesNext: null,
+    partiesStarted: false,
+  };
+  const persist = async (): Promise<void> => {
+    if (resume?.onProgress) await resume.onProgress(cp);
+  };
 
   console.log(`Fetching docket ${opts.docketId}…`);
-  const docket = await client.getDocket(opts.docketId);
-  const entries = await client.getAllDocketEntries(opts.docketId);
-  console.log(`  ${entries.length} entries`);
+  if (!cp.docket) {
+    cp.docket = await client.getDocket(opts.docketId);
+    await persist();
+  }
+  const docket = cp.docket;
 
+  // Entries — resumable. MAX_PAGES only chunks the loop; completion (next===null)
+  // or a ThrottledError ends it. Every page is checkpointed, so a throttle
+  // mid-pagination leaves durable progress and the next window resumes the tail.
+  while (!(cp.entriesStarted && cp.entriesNext === null)) {
+    const { next } = await client.fetchDocketEntries(opts.docketId, {
+      resumeFrom: cp.entriesStarted ? cp.entriesNext : undefined,
+      onPage: async (page, nextCursor) => {
+        cp.entries.push(...page);
+        cp.entriesNext = nextCursor;
+        cp.entriesStarted = true;
+        await persist();
+      },
+    });
+    cp.entriesStarted = true;
+    cp.entriesNext = next;
+    await persist();
+  }
+  console.log(`  ${cp.entries.length} entries`);
+
+  // Parties — resumable. A ThrottledError MUST propagate (resume next window), not
+  // be swallowed: swallowing it would "complete" the case with zero parties. Only
+  // genuine non-throttle failures are tolerated (parties stay as-fetched/empty).
+  try {
+    while (!(cp.partiesStarted && cp.partiesNext === null)) {
+      const { next } = await client.fetchParties(opts.docketId, {
+        resumeFrom: cp.partiesStarted ? cp.partiesNext : undefined,
+        onPage: async (page, nextCursor) => {
+          cp.parties.push(...page);
+          cp.partiesNext = nextCursor;
+          cp.partiesStarted = true;
+          await persist();
+        },
+      });
+      cp.partiesStarted = true;
+      cp.partiesNext = next;
+      await persist();
+    }
+  } catch (e) {
+    if (e instanceof ThrottledError) throw e;
+    console.warn("parties fetch failed:", (e as Error).message);
+  }
+
+  // Terminal: all CL pages are in. Hash (off-quota storage host) + map run once.
   const source = makeSource(docket, now);
-
-  const entriesToHash = entries.slice(0, opts.hashFirstNEntries);
+  const entriesRaw = dedupeById(cp.entries);
+  const entriesToHash = entriesRaw.slice(0, opts.hashFirstNEntries);
   const urls = entriesToHash
     .flatMap((e) => e.recap_documents ?? [])
     .filter((d) => d.filepath_local)
@@ -71,17 +154,13 @@ export async function fetchAndMapCase(
   const cids = await hashDocuments(urls);
   console.log(`  ${cids.size} hashed`);
 
-  let parties: PartyRecord[] = [];
-  try {
-    const rawParties = await client.getAllParties(opts.docketId);
-    parties = rawParties.map((p) => mapParty(p, source, now));
-    console.log(`  ${parties.length} parties`);
-  } catch (e) {
-    console.warn("parties fetch failed:", (e as Error).message);
-  }
+  const parties: PartyRecord[] = dedupeById(cp.parties).map((p) =>
+    mapParty(p, source, now),
+  );
+  console.log(`  ${parties.length} parties`);
 
   const docketRecord = mapDocket(docket, now, now);
-  const entryRecords: DocketEntryRecord[] = entries.map((e) =>
+  const entryRecords: DocketEntryRecord[] = entriesRaw.map((e) =>
     mapEntry(e, source, now, cids),
   );
 

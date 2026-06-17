@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MappedCase } from "./build.js";
+import {
+  type FetchCheckpoint,
+  loadCheckpoint,
+  saveCheckpoint,
+} from "./caseCache.js";
 import type { CaseRepo } from "./caseRepo.js";
 import { type CourtListenerClient, ThrottledError } from "./courtlistener.js";
 import {
@@ -187,6 +192,99 @@ describe("runProvision fetch cache", () => {
       });
     }
     expect(mapCase).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runProvision checkpoint resume", () => {
+  const minimalMapped = () =>
+    ({
+      docketRecord: { caseName: "Doe v. Roe", docketNumber: "1:23-cv-1" },
+      entryRecords: [],
+      parties: [],
+      records: [],
+    }) as unknown as MappedCase;
+
+  const partial = (): FetchCheckpoint => ({
+    savedAt: "2026-06-17T18:00:00.000Z",
+    docket: { id: 123 } as unknown as FetchCheckpoint["docket"],
+    entries: [{ id: 1 } as unknown as FetchCheckpoint["entries"][number]],
+    entriesNext: "CURSOR2",
+    entriesStarted: true,
+    parties: [],
+    partiesNext: null,
+    partiesStarted: false,
+  });
+
+  it("persists a checkpoint on throttle, then resumes it to completion + clears it; quota sums per window", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    const cacheDir = join(dir, "cache");
+    await saveLedger(ledgerPath, emptyLedger());
+    const c = { ...cfg(ledgerPath), cacheDir };
+
+    // Window 1: persist progress via onProgress, then throttle.
+    const r1 = await runProvision(123, c, {
+      makeClient: () => clientWithCount(3),
+      mapCase: async (_o, _client, resume) => {
+        await resume?.onProgress?.(partial());
+        throw new ThrottledError(5000);
+      },
+    });
+    expect(r1.status).toBe("throttled");
+    expect(await loadCheckpoint(cacheDir, 123, Date.now())).toBeDefined();
+
+    // Window 2: the resumed checkpoint reaches mapCase; it completes.
+    let received: FetchCheckpoint | undefined;
+    const r2 = await runProvision(123, c, {
+      dryRun: true,
+      makeClient: () => clientWithCount(2),
+      mapCase: async (_o, _client, resume) => {
+        received = resume?.checkpoint;
+        return minimalMapped();
+      },
+    });
+    expect(r2.status).toBe("dry-run");
+    expect(received?.entriesNext).toBe("CURSOR2"); // resumed, not page 1
+    // Checkpoint cleared on success.
+    expect(await loadCheckpoint(cacheDir, 123, Date.now())).toBeUndefined();
+    // Quota = each window's actual calls (3 + 2), not 10+10 reservations.
+    expect((await loadLedger(ledgerPath)).quota.counts[tokenId("t")] ?? 0).toBe(
+      5,
+    );
+  });
+
+  it("clears the checkpoint when the docket 404s on resume", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    const cacheDir = join(dir, "cache");
+    await saveLedger(ledgerPath, emptyLedger());
+    await saveCheckpoint(cacheDir, 123, partial(), new Date().toISOString());
+
+    const r = await runProvision(
+      123,
+      { ...cfg(ledgerPath), cacheDir },
+      {
+        makeClient: () => clientWithCount(1),
+        mapCase: async () => {
+          throw new Error("CourtListener 404: docket not found");
+        },
+      },
+    );
+    expect(r.status).toBe("not-found");
+    expect(await loadCheckpoint(cacheDir, 123, Date.now())).toBeUndefined();
+  });
+
+  it("passes no resume arg when cacheDir is unset (regression)", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    await saveLedger(ledgerPath, emptyLedger());
+    let resumeArg: unknown = "sentinel";
+    await runProvision(123, cfg(ledgerPath), {
+      dryRun: true,
+      makeClient: () => clientWithCount(1),
+      mapCase: async (_o, _client, resume) => {
+        resumeArg = resume;
+        return minimalMapped();
+      },
+    });
+    expect(resumeArg).toBeUndefined();
   });
 });
 
