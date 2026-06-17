@@ -1,10 +1,12 @@
 // pattern: Functional Core
 // Derives a short, DNS-safe, collision-free handle slug for a case account.
-// The PDS rejects long handles (the "Handle too long" failure that forced
-// abrego-garcia-v-noem… down to abrego-garcia), so slugs are capped well under
-// the limit and prefer the plaintiff name for readability.
-
-const MAX_SLUG = 30;
+// The PDS caps the handle LABEL (the part before the service domain) at 18 chars
+// — ensureHandleServiceConstraints throws "Handle too long" for front.length > 18
+// (verified against @atproto/pds 0.4.219). The label IS this slug, so it's capped
+// at 18 regardless of the domain. (This is why abrego-garcia-v-noem [20] failed
+// and was forced to abrego-garcia [13]; the old cap of 30 silently re-broke it
+// for any long case name, e.g. Johnson & Johnson… → 30-char slug → 400.)
+const MAX_SLUG = 18;
 const CASE_SEPARATOR = /\s+vs?\.?\s+/i;
 
 export function slugify(s: string): string {

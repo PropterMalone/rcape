@@ -41,16 +41,30 @@ describe("deriveHandle", () => {
     );
   });
 
-  it("caps the slug length and never ends in a hyphen", () => {
+  it("caps the slug at the PDS 18-char label limit and never ends in a hyphen", () => {
     const h = deriveHandle(
       "The Exceptionally Verbose Plaintiff Coalition Of Many Words Indeed",
       "1:24-cv-9",
       "rcape.org",
     );
     const slug = h.slice(0, h.indexOf("."));
-    expect(slug.length).toBeLessThanOrEqual(30);
+    expect(slug.length).toBeLessThanOrEqual(18);
     expect(slug.endsWith("-")).toBe(false);
-    expect(slug).toBe("the-exceptionally-verbose-plai");
+    expect(slug).toBe("the-exceptionally"); // 18-char cut lands on a hyphen → trimmed
+  });
+
+  it("never exceeds the PDS 18-char label limit, even for very long case names", () => {
+    // The exact bug: Johnson & Johnson… produced a 30-char label → PDS 400
+    // "Handle too long". The label (before .rcape.org) must be ≤18.
+    const h = deriveHandle(
+      "JOHNSON & JOHNSON HEALTH CARE SYSTEMS INC. v. SAVE ON SP, LLC",
+      "2:22-cv-02632",
+      "rcape.org",
+    );
+    const label = h.slice(0, h.indexOf("."));
+    expect(label.length).toBeLessThanOrEqual(18);
+    expect(label.endsWith("-")).toBe(false);
+    expect(h.endsWith(".rcape.org")).toBe(true);
   });
 
   it("derives from the defendant when the plaintiff is the government (criminal cases)", () => {
@@ -80,7 +94,7 @@ describe("deriveHandle", () => {
         "1:24-cv-9",
         "rcape.org",
       ),
-    ).toBe("united-states-steel-corp.rcape.org");
+    ).toBe("united-states-stee.rcape.org"); // plaintiff used, capped at 18
   });
 
   it("disambiguates collisions with a numeric suffix", () => {
@@ -90,12 +104,12 @@ describe("deriveHandle", () => {
     );
   });
 
-  it("keeps the suffixed slug under the cap by trimming the base", () => {
-    const base = "a".repeat(30);
+  it("keeps the suffixed slug under the 18-char cap by trimming the base", () => {
+    const base = "a".repeat(18); // already at the cap
     const taken = new Set([`${base}.rcape.org`]);
     const h = deriveHandle(base, "1:24-cv-4", "rcape.org", taken);
     const slug = h.slice(0, h.indexOf("."));
-    expect(slug.length).toBeLessThanOrEqual(30);
-    expect(slug).toBe(`${"a".repeat(28)}-2`);
+    expect(slug.length).toBeLessThanOrEqual(18);
+    expect(slug).toBe(`${"a".repeat(16)}-2`); // base trimmed to fit "-2"
   });
 });
