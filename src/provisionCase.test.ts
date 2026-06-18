@@ -135,6 +135,34 @@ describe("runProvision incremental quota", () => {
     // Reservation (17) reconciled down to the actual 13 calls.
     expect(ledger.quota.counts[tokenId("t")] ?? 0).toBe(ACTUAL);
   });
+
+  it("applies the rolling-window gate at token selection: a rolling-full token returns quota-exhausted with no CL call", async () => {
+    const ledgerPath = join(dir, "ledger.json");
+    // Calendar quota untouched (0 spent today) so the ONLY blocker is the rolling
+    // 24h window: 125 calls in the last 24h leave < RESERVED_CALLS_PER_CASE free.
+    // Without nowMs at the provision selectToken, this would slip through and burn
+    // a CL request into an already-spent window (the 2026-06-17 freeze pattern).
+    const now = Date.now();
+    const recent = Array.from(
+      { length: 125 },
+      (_, i) => now - i * 600_000, // spread over the last ~20.8h, all in-window
+    );
+    await saveLedger(ledgerPath, {
+      ...emptyLedger(),
+      calls: { [tokenId("t")]: recent },
+    });
+
+    let clientMade = false;
+    const result = await runProvision(123, cfg(ledgerPath), {
+      makeClient: () => {
+        clientMade = true;
+        return clientWithCount(0);
+      },
+    });
+
+    expect(result.status).toBe("quota-exhausted");
+    expect(clientMade).toBe(false); // no CL client ever constructed → no call
+  });
 });
 
 describe("runProvision fetch cache", () => {
@@ -184,10 +212,13 @@ describe("runProvision fetch cache", () => {
     const ledgerPath = join(dir, "ledger.json");
     await saveLedger(ledgerPath, emptyLedger());
     const mapCase = sampleMapCase();
+    // 2 calls/cycle keeps both runs under the 5/min rolling window so the second
+    // provision is gated only by the (absent) cache, not the rolling-window gate
+    // now applied at token selection.
     for (let i = 0; i < 2; i++) {
       await runProvision(123, cfg(ledgerPath), {
         dryRun: true,
-        makeClient: () => clientWithCount(5),
+        makeClient: () => clientWithCount(2),
         mapCase: mapCase as never,
       });
     }

@@ -306,9 +306,19 @@ export async function runProvision(
       : undefined;
 
   if (!mapped) {
-    // Pick a token from the pool with room for a whole case. None → the shared
-    // budget is spent for the day across every token.
-    const token = selectToken(ledger, cfg.tokens, day, RESERVED_CALLS_PER_CASE);
+    // Pick a token from the pool with room for a whole case. nowMs engages the
+    // predictive rolling-window gate (the point of the rolling ledger): a token
+    // whose 24h/hourly window is full is skipped here too, not just at the drain
+    // gate — without it the second independent selection re-introduces the 429 the
+    // moment the pool holds more than one token. None → no token has both daily
+    // budget AND an open rolling window.
+    const token = selectToken(
+      ledger,
+      cfg.tokens,
+      day,
+      RESERVED_CALLS_PER_CASE,
+      Date.now(),
+    );
     if (!token) {
       return { status: "quota-exhausted", day };
     }
