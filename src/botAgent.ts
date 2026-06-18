@@ -100,6 +100,27 @@ export interface BotAgent {
   listRecords(collection: string): Promise<{ uri: string; value: unknown }[]>;
 }
 
+// pattern: Functional Core
+// True only for a genuine "record absent" fault from com.atproto.repo.getRecord:
+// atproto surfaces it as an XRPCError whose `.error` is "RecordNotFound" (or a
+// 400/404 carrying that in the message). Everything else (500, network, auth) is
+// a real failure the caller must see, not a stand-in for "not there yet".
+export function isRecordNotFound(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { error?: unknown; message?: unknown; status?: unknown };
+  const error = typeof err.error === "string" ? err.error : "";
+  const message = typeof err.message === "string" ? err.message : "";
+  const status = typeof err.status === "number" ? err.status : undefined;
+  if (/RecordNotFound|Could not locate record/i.test(`${error} ${message}`)) {
+    return true;
+  }
+  // A bare 400/404 whose body names the missing record also counts.
+  return (
+    (status === 400 || status === 404) &&
+    /not found|RecordNotFound/i.test(message)
+  );
+}
+
 function toMention(n: RawNotification): MentionNotif {
   const record = n.record as RichtextRecord & {
     text?: string;
@@ -251,10 +272,13 @@ export async function createBotAgent(opts: {
           rkey,
         });
         return data.value;
-      } catch {
-        // A missing record (first run, before the list/post exists) is expected —
-        // surfaced as undefined, not an error, so the orchestrator can create it.
-        return undefined;
+      } catch (e) {
+        // ONLY a genuine "record not found" is surfaced as undefined (expected on
+        // first run, before the list/post exists). A 500/network/auth fault must
+        // rethrow — swallowing it would let ensurePinnedPost read undefined and
+        // clobber the live profile (displayName/avatar/bio) with an empty base.
+        if (isRecordNotFound(e)) return undefined;
+        throw e;
       }
     },
     async listRecords(collection): Promise<{ uri: string; value: unknown }[]> {

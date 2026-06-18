@@ -240,6 +240,28 @@ describe("regenerateDirectory", () => {
     ).toBe(listCreatedAt);
   });
 
+  it("does not clobber the profile when the profile read faults", async () => {
+    // getRecord(PROFILE,"self") rethrows on a real PDS fault (not RecordNotFound)
+    // per the narrowed botAgent.getRecord; ensurePinnedPost must abort rather than
+    // spread an empty base and wipe displayName/avatar/bio.
+    const { agent } = fakeAgent();
+    const putSpy = vi.spyOn(agent, "putRecord");
+    vi.spyOn(agent, "getRecord").mockImplementation(async (collection) => {
+      if (collection === "app.bsky.actor.profile") {
+        throw new Error("UpstreamFailure: PDS 500");
+      }
+      return undefined;
+    });
+    await regenerateDirectory(
+      { agent, cfg: { ledgerPath, gistToken: "t", gistId: "GID" } },
+      async () => ({ ok: true }),
+    );
+    // No profile putRecord at all — the fault aborted the pin path.
+    expect(
+      putSpy.mock.calls.some((c) => c[0] === "app.bsky.actor.profile"),
+    ).toBe(false);
+  });
+
   it("never throws when the gist call rejects (best-effort)", async () => {
     const { agent } = fakeAgent();
     const gistFn = vi.fn(async (): Promise<GistUpdateResult> => {
