@@ -12,6 +12,7 @@ import {
   loadLedger,
   recordCase,
   saveLedger,
+  tokenId,
 } from "./ledger.js";
 import { monitorOnce, selectDueCases } from "./monitor.js";
 import type { ProvisionConfig } from "./provisionCase.js";
@@ -196,6 +197,10 @@ describe("monitorOnce", () => {
     // filings bumped by the 2 posted entries (5 prior + 2) so the directory count
     // stays current — previously left stale at the provision-time value.
     expect(l.cases["123"]?.filings).toBe(7);
+    // reconcileMonitor wrote the 3 actual calls into the rolling 24h log — if
+    // recordCalls were dropped from the reconcile the predictive gate would stay
+    // empty with no failing test (the pre-fix freeze). This asserts write-through.
+    expect(l.calls?.[tokenId("t")]?.length ?? 0).toBe(3);
   });
 
   it("budget gate: does not fetch when a token lacks headroom beyond provisioning", async () => {

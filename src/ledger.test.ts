@@ -374,6 +374,21 @@ describe("rolling-window call log (predictive 5/min·50/hr·125/24h gate)", () =
     expect(rollingStartableAt(l, TOK, 12, NOW)).toBeLessThanOrEqual(NOW);
   });
 
+  it("blocks on the 50/hr window and reopens ~1h out (the binding window past the minute)", () => {
+    // 50 calls in the hour → the 51st would 429 on the 50/hr scope (a 2026-06-16
+    // freeze cause). need=1 (the small windows ignore case-size need). The 50/hr
+    // reopen (NOW + 1h) dominates the 5/min reopen (NOW + 60s), so the gate is the
+    // hour window. Deleting {windowMs:3_600_000,cap:50} from CL_RATE_WINDOWS would
+    // make this NOW + 60s and fail — closing the gap that left all 393 green.
+    const l = recordCalls(emptyLedger(), TOK, NOW, 50);
+    expect(rollingStartableAt(l, TOK, 1, NOW)).toBe(NOW + HR);
+    expect(rollingStartableAt(l, TOK, 1, NOW)).toBeGreaterThan(NOW);
+    // Once the hour passes, the window has room again.
+    expect(rollingStartableAt(l, TOK, 1, NOW + HR + 1)).toBeLessThanOrEqual(
+      NOW + HR + 1,
+    );
+  });
+
   it("blocks on the 125/24h rolling window and reopens exactly when calls age out", () => {
     // 120 calls made 23h ago: minute & hour windows are clear now, but the 24h
     // window is at 120/125 — starting a case that needs 12 would breach it. They

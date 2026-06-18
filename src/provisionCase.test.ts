@@ -134,6 +134,10 @@ describe("runProvision incremental quota", () => {
     const ledger = await loadLedger(ledgerPath);
     // Reservation (17) reconciled down to the actual 13 calls.
     expect(ledger.quota.counts[tokenId("t")] ?? 0).toBe(ACTUAL);
+    // The rolling 24h log also reflects the ACTUAL calls — if recordCalls were
+    // dropped from reconcileQuota the predictive gate would silently stay empty
+    // (the pre-fix freeze), with no failing test. This is that test.
+    expect(ledger.calls?.[tokenId("t")]?.length ?? 0).toBe(ACTUAL);
   });
 
   it("applies the rolling-window gate at token selection: a rolling-full token returns quota-exhausted with no CL call", async () => {
