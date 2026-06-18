@@ -98,6 +98,9 @@ export interface BotAgent {
   ): Promise<StrongRef>;
   getRecord(collection: string, rkey: string): Promise<unknown | undefined>;
   listRecords(collection: string): Promise<{ uri: string; value: unknown }[]>;
+  // Delete a record from the bot's OWN repo (e.g. a graph.list listitem pointing
+  // at a superseded case account). Idempotent at the PDS for an absent record.
+  deleteRecord(collection: string, rkey: string): Promise<void>;
 }
 
 // pattern: Functional Core
@@ -280,6 +283,13 @@ export async function createBotAgent(opts: {
         if (isRecordNotFound(e)) return undefined;
         throw e;
       }
+    },
+    async deleteRecord(collection, rkey): Promise<void> {
+      await agent.com.atproto.repo.deleteRecord({
+        repo: did,
+        collection,
+        rkey,
+      });
     },
     async listRecords(collection): Promise<{ uri: string; value: unknown }[]> {
       const out: { uri: string; value: unknown }[] = [];

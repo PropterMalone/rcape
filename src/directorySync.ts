@@ -39,6 +39,7 @@ export interface DirectoryAgent {
   ): Promise<StrongRef>;
   getRecord(collection: string, rkey: string): Promise<unknown | undefined>;
   listRecords(collection: string): Promise<{ uri: string; value: unknown }[]>;
+  deleteRecord(collection: string, rkey: string): Promise<void>;
 }
 
 export interface DirectoryDeps {
@@ -100,9 +101,12 @@ async function ensurePinnedPost(
 }
 
 // Ensure a followable `app.bsky.graph.list` of the case accounts exists and holds
-// a listitem for every completed case. Idempotent: the list is created once (fixed
-// rkey → deterministic AT-URI), and only case DIDs not already in the list get a
-// new listitem. Reads are PDS-local (the bot's own repo), so no CL quota is spent.
+// exactly the completed-case DIDs. Idempotent: the list is created once (fixed
+// rkey → deterministic AT-URI); completed DIDs not yet listed get a new listitem,
+// AND listitems whose subject is no longer in the completed set (a superseded
+// account from a --force re-provision, or any stale DID) are deleted — so the
+// followable list never points at a dead/superseded account. Reads + writes are
+// PDS-local (the bot's own repo), so no CL quota is spent.
 async function ensureListMembership(
   agent: DirectoryAgent,
   completedDids: string[],
@@ -119,11 +123,18 @@ async function ensureListMembership(
     });
   }
   const existing = await agent.listRecords(LISTITEM);
-  const existingSubjects = new Set(
-    existing
-      .map((r) => (r.value as { subject?: string }).subject)
-      .filter((s): s is string => typeof s === "string"),
-  );
+  const wanted = new Set(completedDids);
+  const existingSubjects = new Set<string>();
+  for (const r of existing) {
+    const subject = (r.value as { subject?: string }).subject;
+    if (typeof subject !== "string") continue;
+    existingSubjects.add(subject);
+    // Prune a listitem whose subject is no longer a completed case (superseded by
+    // a --force re-provision, or otherwise gone). rkey is the last path segment.
+    if (!wanted.has(subject)) {
+      await agent.deleteRecord(LISTITEM, rkeyFromUri(r.uri));
+    }
+  }
   for (const did of listMembershipDiff(completedDids, existingSubjects)) {
     await agent.createRecord(LISTITEM, {
       $type: LISTITEM,

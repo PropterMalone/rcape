@@ -29,6 +29,9 @@ function fakeAgent() {
         .filter(([k]) => k.startsWith(`${collection}/`))
         .map(([k, value]) => ({ uri: `at://did:plc:bot/${k}`, value }));
     },
+    async deleteRecord(collection, rkey) {
+      records.delete(`${collection}/${rkey}`);
+    },
   };
   return { agent, records };
 }
@@ -260,6 +263,36 @@ describe("regenerateDirectory", () => {
     expect(
       putSpy.mock.calls.some((c) => c[0] === "app.bsky.actor.profile"),
     ).toBe(false);
+  });
+
+  it("prunes a listitem whose subject is a superseded DID, keeps the current one", async () => {
+    const { agent, records } = fakeAgent();
+    // Pre-seed the list + a stale listitem pointing at a superseded account (the
+    // old DID a --force re-provision archived) plus the still-current case1.
+    records.set("app.bsky.graph.list/shelf", {
+      $type: "app.bsky.graph.list",
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    records.set("app.bsky.graph.listitem/stale", {
+      $type: "app.bsky.graph.listitem",
+      subject: "did:plc:superseded",
+      list: "at://did:plc:bot/app.bsky.graph.list/shelf",
+    });
+    records.set("app.bsky.graph.listitem/keep", {
+      $type: "app.bsky.graph.listitem",
+      subject: "did:plc:case1",
+      list: "at://did:plc:bot/app.bsky.graph.list/shelf",
+    });
+    // The ledger's only completed case is case1 (seeded in beforeEach).
+    await regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
+      ok: true,
+    }));
+
+    const subjects = [...records.entries()]
+      .filter(([k]) => k.startsWith("app.bsky.graph.listitem/"))
+      .map(([, v]) => (v as { subject: string }).subject);
+    expect(subjects).toContain("did:plc:case1");
+    expect(subjects).not.toContain("did:plc:superseded");
   });
 
   it("never throws when the gist call rejects (best-effort)", async () => {

@@ -139,6 +139,9 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     },
     getRecord: async (collection, rkey) => records.get(`${collection}/${rkey}`),
     listRecords: async () => [],
+    deleteRecord: async (collection, rkey) => {
+      records.delete(`${collection}/${rkey}`);
+    },
   };
   return { agent, replies, seenAts };
 }
