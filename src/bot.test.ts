@@ -113,6 +113,9 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     embed?: unknown;
   }[] = [];
   const seenAts: string[] = [];
+  // In-memory own-repo records for the directory feature (no-ops in tests that
+  // don't set a gist id, but typed so the mock satisfies BotAgent).
+  const records = new Map<string, unknown>();
   const agent: BotAgent = {
     did: "did:bot",
     graph: allowGraph(["did:alice"]),
@@ -126,6 +129,16 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
       seenAts.push(seenAt);
     },
     getPostThread: async () => thread,
+    createRecord: async (collection) => ({
+      uri: `at://did:bot/${collection}/auto`,
+      cid: "c",
+    }),
+    putRecord: async (collection, rkey, record) => {
+      records.set(`${collection}/${rkey}`, record);
+      return { uri: `at://did:bot/${collection}/${rkey}`, cid: "c" };
+    },
+    getRecord: async (collection, rkey) => records.get(`${collection}/${rkey}`),
+    listRecords: async () => [],
   };
   return { agent, replies, seenAts };
 }

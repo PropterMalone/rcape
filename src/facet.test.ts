@@ -3,6 +3,7 @@ import {
   extractExternalEmbed,
   extractLinkFacets,
   extractPostLinks,
+  linkFacets,
   mentionFacets,
   postTextWithCard,
 } from "./facet.js";
@@ -18,6 +19,33 @@ const externalCard = (
     $type: "app.bsky.embed.external",
     external: { uri, title, description },
   },
+});
+
+describe("linkFacets", () => {
+  it("emits a #link facet per http(s) URL with UTF-8 byte offsets", () => {
+    const text = "see https://example.com/a and https://example.com/b";
+    const facets = linkFacets(text);
+    expect(facets).toHaveLength(2);
+    expect(facets[0]?.features[0]?.uri).toBe("https://example.com/a");
+    // byteStart of the first URL = byte length of "see "
+    expect(facets[0]?.index.byteStart).toBe(4);
+    expect(facets[0]?.index.byteEnd).toBe(4 + "https://example.com/a".length);
+  });
+
+  it("shifts offsets for a multibyte char before the URL", () => {
+    const text = "→ https://example.com/x"; // "→" is 3 UTF-8 bytes
+    const f = linkFacets(text)[0];
+    expect(f?.index.byteStart).toBe(Buffer.byteLength("→ ", "utf8"));
+  });
+
+  it("excludes trailing sentence punctuation from the link", () => {
+    const f = linkFacets("go to https://example.com/p.")[0];
+    expect(f?.features[0]?.uri).toBe("https://example.com/p");
+  });
+
+  it("returns no facets when there's no URL", () => {
+    expect(linkFacets("no links here")).toEqual([]);
+  });
 });
 
 // The UTF-8 byte length of a string, the unit AT Protocol facets index in.

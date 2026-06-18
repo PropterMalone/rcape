@@ -14,6 +14,7 @@ import { buildCaseCard } from "./card.js";
 import type { CaseHint } from "./caseHint.js";
 import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
+import { regenerateDirectory } from "./directorySync.js";
 import { type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
 import {
@@ -379,16 +380,24 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     );
   }
 
-  await drain(deps, provision);
+  const provisioned = await drain(deps, provision);
 
   // After draining the provision queue, re-check a few already-shelved cases for
   // new filings and append them (makes "follow for new filings" true). Self-gated
   // by cadence + budget, so most cycles are a cheap no-op. Best-effort: a monitor
   // failure must never abort the poll cycle.
+  let monitorUpdated = 0;
   try {
-    await monitorOnce(deps);
+    monitorUpdated = (await monitorOnce(deps)).updated;
   } catch (e) {
     console.error("monitor cycle failed:", e instanceof Error ? e.message : e);
+  }
+
+  // Regenerate the public directory ONCE per cycle when the shelf changed (a new
+  // provision or monitor-added filings). regenerateDirectory is itself best-effort
+  // and never throws, so this can't abort the cycle.
+  if (provisioned || monitorUpdated > 0) {
+    await regenerateDirectory(deps);
   }
 }
 
@@ -604,8 +613,11 @@ function classifyDeferral(
 async function drain(
   deps: BotDeps,
   provision: (id: number, cfg: ProvisionConfig) => Promise<ProvisionResult>,
-): Promise<void> {
+): Promise<boolean> {
   let queue = await loadQueue(deps.queuePath);
+  // Whether this drain shelved at least one case — drives a single directory
+  // regeneration after the loop (not one per case).
+  let provisioned = false;
   while (true) {
     const job = nextDrainable(queue, Date.now());
     if (!job) break;
@@ -714,6 +726,7 @@ async function drain(
     await persistQueue(deps.queuePath, queue);
 
     if (result.status === "provisioned") {
+      provisioned = true;
       const text = buildReply({
         kind: "provisioned",
         caseName: result.caseName,
@@ -784,6 +797,7 @@ async function drain(
       );
     }
   }
+  return provisioned;
 }
 
 async function main(): Promise<void> {
@@ -808,6 +822,11 @@ async function main(): Promise<void> {
     zoneId: env("CLOUDFLARE_ZONE_ID"),
     ledgerPath: fileURLToPath(new URL("../data/ledger.json", import.meta.url)),
     cacheDir: fileURLToPath(new URL("../data/case-cache", import.meta.url)),
+    // Public-directory gist (optional). Both must be set to push the table; the
+    // graph.list runs regardless (bot self-auth only). The token is a PropterMalone
+    // gist-scoped PAT; the id is the shelf gist created once under PropterMalone.
+    gistToken: process.env.RCAPE_GIST_TOKEN,
+    gistId: process.env.RCAPE_DIRECTORY_GIST_ID,
   };
   const ownerHandle = env("RCAPE_OWNER_HANDLE");
   // Resolve the owner handle to a DID once at startup for the @proptermalone

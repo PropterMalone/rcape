@@ -84,6 +84,20 @@ export interface BotAgent {
   // docket can still resolve one present in an ancestor or quoted post. Returns
   // the raw thread view (or null when the post is gone); the caller scans it.
   getPostThread(uri: string): Promise<ThreadView | null>;
+  // Generic record ops on the bot's OWN repo, for the public-directory feature:
+  // the graph.list + listitem records and the combined pinned post. createRecord
+  // lets the server assign the rkey; putRecord writes at a caller-chosen rkey
+  // (idempotent — used for the fixed "shelf" list and "shelfintro" post). Both
+  // return the {uri,cid} ref (putRecord's cid is needed to pin the post).
+  // getRecord/listRecords read the bot's own collections (PDS reads, no CL quota).
+  createRecord(collection: string, record: unknown): Promise<StrongRef>;
+  putRecord(
+    collection: string,
+    rkey: string,
+    record: unknown,
+  ): Promise<StrongRef>;
+  getRecord(collection: string, rkey: string): Promise<unknown | undefined>;
+  listRecords(collection: string): Promise<{ uri: string; value: unknown }[]>;
 }
 
 function toMention(n: RawNotification): MentionNotif {
@@ -211,6 +225,52 @@ export async function createBotAgent(opts: {
       // structural slice thread.ts walks; the cast is sound (it reads only the
       // fields that exist), and NotFound/Blocked roots scan to no docket.
       return data.thread as unknown as ThreadView;
+    },
+    async createRecord(collection, record): Promise<StrongRef> {
+      const res = await agent.com.atproto.repo.createRecord({
+        repo: did,
+        collection,
+        record: record as Record<string, unknown>,
+      });
+      return { uri: res.data.uri, cid: res.data.cid };
+    },
+    async putRecord(collection, rkey, record): Promise<StrongRef> {
+      const res = await agent.com.atproto.repo.putRecord({
+        repo: did,
+        collection,
+        rkey,
+        record: record as Record<string, unknown>,
+      });
+      return { uri: res.data.uri, cid: res.data.cid };
+    },
+    async getRecord(collection, rkey): Promise<unknown | undefined> {
+      try {
+        const { data } = await agent.com.atproto.repo.getRecord({
+          repo: did,
+          collection,
+          rkey,
+        });
+        return data.value;
+      } catch {
+        // A missing record (first run, before the list/post exists) is expected —
+        // surfaced as undefined, not an error, so the orchestrator can create it.
+        return undefined;
+      }
+    },
+    async listRecords(collection): Promise<{ uri: string; value: unknown }[]> {
+      const out: { uri: string; value: unknown }[] = [];
+      let cursor: string | undefined;
+      do {
+        const { data } = await agent.com.atproto.repo.listRecords({
+          repo: did,
+          collection,
+          limit: 100,
+          cursor,
+        });
+        for (const r of data.records) out.push({ uri: r.uri, value: r.value });
+        cursor = data.cursor;
+      } while (cursor);
+      return out;
     },
   };
 }

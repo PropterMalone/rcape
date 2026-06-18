@@ -13,6 +13,33 @@ export interface MentionFacet {
   features: Array<{ $type: "app.bsky.richtext.facet#mention"; did: string }>;
 }
 
+export interface LinkFacet {
+  index: { byteStart: number; byteEnd: number };
+  features: Array<{ $type: "app.bsky.richtext.facet#link"; uri: string }>;
+}
+
+// Build #link facets for every http(s) URL in `text` so plain-text URLs (e.g. in
+// the pinned directory post) render as tappable links. Without a facet a URL is
+// inert text. Offsets are UTF-8 BYTE indices, same as mentionFacets — a multibyte
+// char before the URL must shift the offset. A trailing ")"/"."/"," is excluded
+// from the match so sentence punctuation isn't swallowed into the link.
+export function linkFacets(text: string): LinkFacet[] {
+  const facets: LinkFacet[] = [];
+  const re = /https?:\/\/[^\s)]+[^\s).,]/g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex-exec loop
+  while ((m = re.exec(text)) !== null) {
+    const uri = m[0];
+    const byteStart = Buffer.byteLength(text.slice(0, m.index), "utf8");
+    const byteEnd = byteStart + Buffer.byteLength(uri, "utf8");
+    facets.push({
+      index: { byteStart, byteEnd },
+      features: [{ $type: "app.bsky.richtext.facet#link", uri }],
+    });
+  }
+  return facets;
+}
+
 // Whether `@<handle>` ending at index `end` is a WHOLE handle, i.e. the text
 // doesn't continue it into a longer handle. Mirrors Bluesky's richtext rule: a
 // trailing "." or "-" is sentence punctuation (ends the handle) UNLESS an

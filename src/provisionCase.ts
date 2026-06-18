@@ -58,6 +58,12 @@ export interface ProvisionConfig {
   // test configs don't have to supply it; absent ⇒ caching disabled (every
   // provision re-fetches), which is the prior behavior.
   cacheDir?: string;
+  // Public-directory regeneration (directorySync.ts). Both optional: the gist
+  // table updates only when BOTH are set (a PropterMalone gist-scoped token +
+  // the shelf gist id); absent ⇒ the directory feature is off. The combined
+  // pinned post also needs gistId for its link.
+  gistToken?: string;
+  gistId?: string;
 }
 
 // REST-counted calls per case = 1 (docket) + ceil(entries/100) + ceil(parties/100);
