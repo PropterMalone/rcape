@@ -9,6 +9,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CaseRepo } from "./caseRepo.js";
 import { BOT_SELF_LABEL, truncate } from "./companionPost.js";
+import { HOW_IT_WORKS_GIST } from "./directory.js";
 import { upsertAtprotoTxt } from "./dns.js";
 import { createCaseAccount, generatePassword } from "./provision.js";
 
@@ -21,7 +22,7 @@ const INTRO = truncate(
 );
 
 const BIO = truncate(
-  "I mirror U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket and I shelve it. How it works: https://gist.github.com/PropterMalone/579b9d77577fe45c3cb540905ba7d6ec Tended by @proptermalone.",
+  `I mirror U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket and I shelve it. How it works: ${HOW_IT_WORKS_GIST} Tended by @proptermalone.`,
   256,
 );
 

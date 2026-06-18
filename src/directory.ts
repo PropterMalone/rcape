@@ -6,9 +6,9 @@
 
 import type { CaseEntry } from "./ledger.js";
 
-// The existing, hand-authored "how it works" gist (kept linked in the pinned
-// post). Mirrors the URL in initBot.ts's bio so the two never drift apart.
-const HOW_IT_WORKS_GIST =
+// The existing, hand-authored "how it works" gist. Single source of truth for
+// the URL — initBot.ts imports this for the bio so the two never drift apart.
+export const HOW_IT_WORKS_GIST =
   "https://gist.github.com/PropterMalone/579b9d77577fe45c3cb540905ba7d6ec";
 const OWNER_PROFILE = "https://bsky.app/profile/proptermalone.bsky.social";
 const BOT_PROFILE = "https://bsky.app/profile/ape.rcape.org";
@@ -58,13 +58,14 @@ export function buildDirectoryMarkdown(cases: CaseEntry[]): string {
   ].join("\n");
 }
 
-// The combined pinned-post copy: keeps the how-it-works link AND adds the shelf
-// gist. Set once (the gist URL is stable), so this is not regenerated per case.
+// The combined pinned-post copy: links the shelf gist. The how-it-works link is
+// dropped here (it already lives in the bio) so the post stays under the 300-
+// grapheme app.bsky.feed.post cap with a real 32-char gist id. Set once (the gist
+// URL is stable), so this is not regenerated per case.
 export function buildPinnedPostText(shelfGistUrl: string): string {
   return [
     "🦍 R.C. Ape mirrors U.S. federal court dockets from RECAP as native AT Protocol repos. Mention me with a CourtListener docket link and I shelve it.",
     "",
-    `→ How it works: ${HOW_IT_WORKS_GIST}`,
     `→ The full shelf: ${shelfGistUrl}`,
   ].join("\n");
 }

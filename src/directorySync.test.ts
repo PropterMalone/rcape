@@ -80,28 +80,70 @@ describe("regenerateDirectory", () => {
     expect(gistFn).not.toHaveBeenCalled();
   });
 
-  it("creates + pins the combined intro post once, then is idempotent", async () => {
+  it("creates (TID rkey) + pins the combined intro post once, then is idempotent", async () => {
     const { agent, records } = fakeAgent();
+    // The profile always exists post-init; pre-seed it so the pin can be set.
+    records.set("app.bsky.actor.profile/self", {
+      $type: "app.bsky.actor.profile",
+      displayName: "R.C. Ape",
+    });
     const gistFn = vi.fn(async (): Promise<GistUpdateResult> => ({ ok: true }));
     const cfg = { ledgerPath, gistToken: "tok", gistId: "GID" };
 
     await regenerateDirectory({ agent, cfg }, gistFn);
-    const post = records.get("app.bsky.feed.post/shelfintro") as {
-      text: string;
-    };
-    expect(post.text).toContain("https://gist.github.com/PropterMalone/GID");
     const profile = records.get("app.bsky.actor.profile/self") as {
       pinnedPost?: { uri: string };
     };
-    expect(profile.pinnedPost?.uri).toContain("/shelfintro");
+    // The pin points at a server-assigned post record (no fixed rkey).
+    const pinnedUri = profile.pinnedPost?.uri;
+    expect(pinnedUri).toMatch(/^at:\/\/did:plc:bot\/app\.bsky\.feed\.post\//);
+    const post = records.get(
+      pinnedUri?.replace("at://did:plc:bot/", "") as string,
+    ) as { text: string };
+    expect(post.text).toContain("https://gist.github.com/PropterMalone/GID");
 
-    // Second run: the pin already points at our intro → no profile rewrite.
+    // Second run: the pinned post still links the current gist → no rewrite.
+    const createSpy = vi.spyOn(agent, "createRecord");
     const putSpy = vi.spyOn(agent, "putRecord");
     await regenerateDirectory({ agent, cfg }, gistFn);
     const repinnedProfile = putSpy.mock.calls.some(
       (c) => c[0] === "app.bsky.actor.profile",
     );
     expect(repinnedProfile).toBe(false);
+    const repostedIntro = createSpy.mock.calls.some(
+      (c) => c[0] === "app.bsky.feed.post",
+    );
+    expect(repostedIntro).toBe(false);
+  });
+
+  it("re-pins a fresh post when the gist id changed", async () => {
+    const { agent, records } = fakeAgent();
+    records.set("app.bsky.actor.profile/self", {
+      $type: "app.bsky.actor.profile",
+      displayName: "R.C. Ape",
+    });
+    const gistFn = vi.fn(async (): Promise<GistUpdateResult> => ({ ok: true }));
+
+    await regenerateDirectory(
+      { agent, cfg: { ledgerPath, gistToken: "t", gistId: "OLD" } },
+      gistFn,
+    );
+    const createSpy = vi.spyOn(agent, "createRecord");
+    await regenerateDirectory(
+      { agent, cfg: { ledgerPath, gistToken: "t", gistId: "NEW" } },
+      gistFn,
+    );
+    // The pin now links the NEW gist via a freshly created post.
+    expect(
+      createSpy.mock.calls.some((c) => c[0] === "app.bsky.feed.post"),
+    ).toBe(true);
+    const profile = records.get("app.bsky.actor.profile/self") as {
+      pinnedPost?: { uri: string };
+    };
+    const post = records.get(
+      profile.pinnedPost?.uri?.replace("at://did:plc:bot/", "") as string,
+    ) as { text: string };
+    expect(post.text).toContain("https://gist.github.com/PropterMalone/NEW");
   });
 
   it("preserves displayName/description when re-pinning (read-merge-write)", async () => {

@@ -108,12 +108,21 @@ describe("listMembershipDiff", () => {
 });
 
 describe("buildPinnedPostText", () => {
-  it("links both the how-it-works and the shelf gist", () => {
+  it("links the shelf gist", () => {
     const text = buildPinnedPostText(
       "https://gist.github.com/PropterMalone/SHELF",
     );
     expect(text).toContain("https://gist.github.com/PropterMalone/SHELF");
-    // keeps the existing how-it-works gist link
-    expect(text).toContain("579b9d77577fe45c3cb540905ba7d6ec");
+  });
+
+  it("stays under 300 graphemes with a realistic 32-char gist id", () => {
+    // app.bsky.feed.post caps `text` at 300 graphemes; a real gist id is 32 hex
+    // chars. The 3-char stub previously hid a 300+ overflow that the PDS rejected.
+    const text = buildPinnedPostText(
+      `https://gist.github.com/PropterMalone/${"a".repeat(32)}`,
+    );
+    expect([...new Intl.Segmenter().segment(text)].length).toBeLessThanOrEqual(
+      300,
+    );
   });
 });

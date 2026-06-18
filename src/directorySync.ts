@@ -22,12 +22,10 @@ const PROFILE = "app.bsky.actor.profile";
 const LIST = "app.bsky.graph.list";
 const LISTITEM = "app.bsky.graph.listitem";
 const SHELF_GIST_FILE = "shelved-dockets.md";
-// Fixed rkey for the combined intro post, so the pin is set exactly once: a later
-// regenerate sees the pin already points at this rkey and skips the rewrite.
-const PIN_RKEY = "shelfintro";
 // Fixed rkey for the followable case-account list, so its AT-URI is deterministic
 // (no need to round-trip the create result) and it's created exactly once.
-const LIST_RKEY = "shelf";
+// NEVER rename — this is baked into the stored graph.list AT-URI.
+export const LIST_RKEY = "shelf";
 
 // Structural deps so directorySync doesn't import BotDeps from bot.ts (which
 // imports this module). The live BotDeps (BotAgent + ProvisionConfig) satisfies it.
@@ -54,10 +52,19 @@ function shelfGistUrl(gistId: string): string {
   return `https://gist.github.com/PropterMalone/${gistId}`;
 }
 
-// Set the combined pinned post exactly once. Idempotent: if the profile already
-// pins our fixed-rkey intro, do nothing. Otherwise create the intro post (at the
-// fixed rkey) and re-pin it, merging over the existing profile so displayName /
-// description / avatar are preserved.
+// The rkey of a post AT-URI: at://<did>/app.bsky.feed.post/<rkey>.
+function rkeyFromUri(uri: string): string {
+  return uri.slice(uri.lastIndexOf("/") + 1);
+}
+
+// Set the combined pinned post. The post uses a server-assigned TID rkey
+// (app.bsky.feed.post is key:tid — a fixed rkey is rejected by the PDS), so
+// idempotency keys off the profile's stored pinnedPost, not a fixed rkey: the pin
+// is "ours and current" only when the pinned post still exists, is one of our
+// posts, AND its text links the CURRENT shelf gist. A changed gistId re-pins a
+// fresh post. Aborts WITHOUT writing the profile when the profile read fails
+// (getRecord ⇒ undefined): the profile always exists post-init, so undefined
+// there means a real PDS fault — spreading {} would wipe displayName/avatar/bio.
 async function ensurePinnedPost(
   agent: DirectoryAgent,
   gistId: string,
@@ -65,10 +72,20 @@ async function ensurePinnedPost(
   const profile = (await agent.getRecord(PROFILE, "self")) as
     | { pinnedPost?: { uri: string; cid: string } }
     | undefined;
-  if (profile?.pinnedPost?.uri.endsWith(`/${PIN_RKEY}`)) return; // already ours
+  if (profile === undefined) return; // read fault — never clobber a live profile
 
-  const text = buildPinnedPostText(shelfGistUrl(gistId));
-  const ref = await agent.putRecord(POST, PIN_RKEY, {
+  const shelfUrl = shelfGistUrl(gistId);
+  const pinnedUri = profile.pinnedPost?.uri;
+  if (pinnedUri?.startsWith(`at://${agent.did}/${POST}/`)) {
+    const pinned = (await agent.getRecord(POST, rkeyFromUri(pinnedUri))) as
+      | { text?: string }
+      | undefined;
+    // Ours AND links the current shelf gist → nothing to do.
+    if (pinned?.text?.includes(shelfUrl)) return;
+  }
+
+  const text = buildPinnedPostText(shelfUrl);
+  const ref = await agent.createRecord(POST, {
     $type: POST,
     text,
     facets: linkFacets(text),
@@ -76,7 +93,7 @@ async function ensurePinnedPost(
     labels: BOT_SELF_LABEL,
   });
   await agent.putRecord(PROFILE, "self", {
-    ...(profile ?? {}),
+    ...profile,
     $type: PROFILE,
     pinnedPost: ref,
   });
