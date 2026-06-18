@@ -44,13 +44,16 @@ async function cf<T>(
   return json.result as T;
 }
 
-export async function upsertAtprotoTxt(
-  handle: string,
+// Upsert a single `did=<did>` TXT record at the exact name `name`. Shared by the
+// handle-resolution records (_atproto.<handle>) and the lexicon-authority record
+// (_lexicon.<authority>) — both are the same `did=` TXT shape, differing only in
+// the record name.
+async function upsertTxt(
+  name: string,
   did: string,
   opts: DnsOptions,
 ): Promise<{ created: boolean }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const name = `_atproto.${handle}`;
   const record = { type: "TXT", name, content: `did=${did}`, ttl: 60 };
 
   const existing = await cf<{ id: string }[]>(
@@ -60,7 +63,7 @@ export async function upsertAtprotoTxt(
     // The previously-used bracket form `name[exact]` is not the documented
     // parameter; its behavior is implementation-defined and not guaranteed to
     // filter at all, so a non-exact match could return an unrelated TXT record
-    // that we'd then overwrite. name.exact matches only _atproto.<handle>.
+    // that we'd then overwrite. name.exact matches only the exact name.
     `/zones/${opts.zoneId}/dns_records?type=TXT&name.exact=${encodeURIComponent(name)}`,
     opts.token,
   );
@@ -84,4 +87,25 @@ export async function upsertAtprotoTxt(
     record,
   );
   return { created: true };
+}
+
+// Handle resolution: `_atproto.<handle>` TXT → the account DID.
+export function upsertAtprotoTxt(
+  handle: string,
+  did: string,
+  opts: DnsOptions,
+): Promise<{ created: boolean }> {
+  return upsertTxt(`_atproto.${handle}`, did, opts);
+}
+
+// Lexicon authority: `_lexicon.<authority-domain>` TXT → the DID whose repo holds
+// the com.atproto.lexicon.schema records for that namespace. For `org.rcape.*` the
+// authority domain is `rcape.org` (the NSID authority reversed). Resolvers read
+// this to find + verify the published lexicons network-wide.
+export function upsertLexiconTxt(
+  authorityDomain: string,
+  did: string,
+  opts: DnsOptions,
+): Promise<{ created: boolean }> {
+  return upsertTxt(`_lexicon.${authorityDomain}`, did, opts);
 }

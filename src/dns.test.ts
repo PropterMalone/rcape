@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { upsertAtprotoTxt } from "./dns.js";
+import { upsertAtprotoTxt, upsertLexiconTxt } from "./dns.js";
 
 type Json = { success: boolean; result?: unknown; errors?: unknown };
 
@@ -91,5 +91,38 @@ describe("upsertAtprotoTxt", () => {
         fetchImpl: fetchImpl as unknown as typeof fetch,
       }),
     ).rejects.toThrow(/Cloudflare/);
+  });
+});
+
+describe("upsertLexiconTxt", () => {
+  it("creates the _lexicon.<authority> TXT pointing at the publisher DID", async () => {
+    const calls: { url: string; method?: string; body?: unknown }[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        url,
+        method: init?.method,
+        body: init?.body ? JSON.parse(init.body as string) : undefined,
+      });
+      if (init?.method === "POST")
+        return res(200, { success: true, result: { id: "lex1" } });
+      return res(200, { success: true, result: [] });
+    });
+
+    const out = await upsertLexiconTxt("rcape.org", "did:plc:bot", {
+      zoneId: "z",
+      token: "t",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(out).toEqual({ created: true });
+    const post = calls.find((c) => c.method === "POST");
+    expect(post?.body).toEqual({
+      type: "TXT",
+      name: "_lexicon.rcape.org",
+      content: "did=did:plc:bot",
+      ttl: 60,
+    });
+    const get = calls.find((c) => c.method === "GET");
+    expect(get?.url).toContain("name.exact=_lexicon.rcape.org");
   });
 });

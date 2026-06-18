@@ -21,6 +21,7 @@
     "provision": "node --env-file=.env --import tsx src/provisionCase.ts",
     "bot": "node --env-file=.env --import tsx src/bot.ts",
     "bot:init": "node --env-file=.env --import tsx src/initBot.ts",
+    "lex:publish": "node --env-file=.env --import tsx src/publishLexicons.ts",
     "validate": "biome check . && tsc --noEmit && vitest run && knip"
   },
   "dependencies": {
