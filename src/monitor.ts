@@ -238,11 +238,18 @@ export async function monitorOnce(
       // UNION this pass's failed rkeys with any the original provision left
       // unrepaired (read fresh inside the lock) — recordCase merges field-wise, so
       // a bare assignment would silently drop the provision-time repair targets.
-      const prior = l.cases[String(docketId)]?.backfillFailed ?? [];
+      const priorCase = l.cases[String(docketId)];
+      const prior = priorCase?.backfillFailed ?? [];
       const failed = [...new Set([...prior, ...result.failed])];
+      // Bump the public filing count so the directory gist's "Filings" column
+      // reflects the just-posted filings (this regen, fired on updated > 0, would
+      // otherwise re-publish the stale provision-time count). Read prior under the
+      // lock, like backfillFailed.
+      const filings = (priorCase?.filings ?? 0) + result.published;
       return recordCase(l, docketId, {
         ...(newHigh ? { highWater: newHigh } : {}),
         ...(failed.length ? { backfillFailed: failed } : {}),
+        filings,
         lastCheckedAt: nowIso,
       } as CaseEntry);
     });

@@ -167,7 +167,7 @@ describe("monitorOnce", () => {
   });
 
   it("appends new filings, advances high-water, and stamps the check", async () => {
-    const ledgerPath = await seed();
+    const ledgerPath = await seed({ filings: 5 });
     const { repo, created } = repoStub();
     const loginRepo = vi.fn(async () => repo);
     const r = await monitorOnce(
@@ -193,6 +193,9 @@ describe("monitorOnce", () => {
     expect(l.cases["123"]?.highWater).toBe("2025-03-02.001"); // newest posted
     expect(l.cases["123"]?.lastCheckedAt).toBe(NOW_ISO);
     expect(l.cases["123"]?.password).toBe("pw"); // partial merge preserved creds
+    // filings bumped by the 2 posted entries (5 prior + 2) so the directory count
+    // stays current — previously left stale at the provision-time value.
+    expect(l.cases["123"]?.filings).toBe(7);
   });
 
   it("budget gate: does not fetch when a token lacks headroom beyond provisioning", async () => {
