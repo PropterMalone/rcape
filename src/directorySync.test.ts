@@ -162,7 +162,7 @@ describe("regenerateDirectory", () => {
       purpose: string;
       name: string;
     };
-    expect(list.purpose).toBe("app.bsky.graph#curatelist");
+    expect(list.purpose).toBe("app.bsky.graph.defs#curatelist");
     expect(list.name).toContain("R.C. Ape");
     // One listitem per completed case, each pointing at the deterministic list URI.
     const items = [...records.entries()].filter(([k]) =>

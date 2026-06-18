@@ -94,7 +94,7 @@ async function ensureListMembership(
   if (!(await agent.getRecord(LIST, LIST_RKEY))) {
     await agent.putRecord(LIST, LIST_RKEY, {
       $type: LIST,
-      purpose: "app.bsky.graph#curatelist",
+      purpose: "app.bsky.graph.defs#curatelist",
       name: "R.C. Ape — Shelved Dockets",
       description:
         "Every U.S. federal docket R.C. Ape has mirrored as a native AT Protocol repo. Follow along.",
