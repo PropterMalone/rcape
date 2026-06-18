@@ -7,7 +7,11 @@
 // in directory.ts (Functional Core).
 
 import { BOT_SELF_LABEL } from "./companionPost.js";
-import { buildDirectoryMarkdown, buildPinnedPostText } from "./directory.js";
+import {
+  buildDirectoryMarkdown,
+  buildPinnedPostText,
+  listMembershipDiff,
+} from "./directory.js";
 import { linkFacets } from "./facet.js";
 import { type GistUpdateResult, updateGist } from "./gistClient.js";
 import { loadLedger } from "./ledger.js";
@@ -15,10 +19,15 @@ import type { StrongRef } from "./queue.js";
 
 const POST = "app.bsky.feed.post";
 const PROFILE = "app.bsky.actor.profile";
+const LIST = "app.bsky.graph.list";
+const LISTITEM = "app.bsky.graph.listitem";
 const SHELF_GIST_FILE = "shelved-dockets.md";
 // Fixed rkey for the combined intro post, so the pin is set exactly once: a later
 // regenerate sees the pin already points at this rkey and skips the rewrite.
 const PIN_RKEY = "shelfintro";
+// Fixed rkey for the followable case-account list, so its AT-URI is deterministic
+// (no need to round-trip the create result) and it's created exactly once.
+const LIST_RKEY = "shelf";
 
 // Structural deps so directorySync doesn't import BotDeps from bot.ts (which
 // imports this module). The live BotDeps (BotAgent + ProvisionConfig) satisfies it.
@@ -73,6 +82,41 @@ async function ensurePinnedPost(
   });
 }
 
+// Ensure a followable `app.bsky.graph.list` of the case accounts exists and holds
+// a listitem for every completed case. Idempotent: the list is created once (fixed
+// rkey → deterministic AT-URI), and only case DIDs not already in the list get a
+// new listitem. Reads are PDS-local (the bot's own repo), so no CL quota is spent.
+async function ensureListMembership(
+  agent: DirectoryAgent,
+  completedDids: string[],
+): Promise<void> {
+  const listUri = `at://${agent.did}/${LIST}/${LIST_RKEY}`;
+  if (!(await agent.getRecord(LIST, LIST_RKEY))) {
+    await agent.putRecord(LIST, LIST_RKEY, {
+      $type: LIST,
+      purpose: "app.bsky.graph#curatelist",
+      name: "R.C. Ape — Shelved Dockets",
+      description:
+        "Every U.S. federal docket R.C. Ape has mirrored as a native AT Protocol repo. Follow along.",
+      createdAt: new Date().toISOString(),
+    });
+  }
+  const existing = await agent.listRecords(LISTITEM);
+  const existingSubjects = new Set(
+    existing
+      .map((r) => (r.value as { subject?: string }).subject)
+      .filter((s): s is string => typeof s === "string"),
+  );
+  for (const did of listMembershipDiff(completedDids, existingSubjects)) {
+    await agent.createRecord(LISTITEM, {
+      $type: LISTITEM,
+      subject: did,
+      list: listUri,
+      createdAt: new Date().toISOString(),
+    });
+  }
+}
+
 // Regenerate the directory. `gistFn` is injectable for tests. Never throws.
 export async function regenerateDirectory(
   deps: DirectoryDeps,
@@ -101,6 +145,13 @@ export async function regenerateDirectory(
 
     // 2. One-time combined pinned post (needs the gist id for the link).
     if (cfg.gistId) await ensurePinnedPost(agent, cfg.gistId);
+
+    // 3. Followable native list of the case accounts (bot self-auth only — runs
+    // regardless of the gist config).
+    await ensureListMembership(
+      agent,
+      cases.filter((c) => c.completed).map((c) => c.did),
+    );
   } catch (e) {
     // Best-effort: a directory failure must never bubble into the provision path.
     console.error(

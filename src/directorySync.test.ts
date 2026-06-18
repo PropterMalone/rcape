@@ -126,6 +126,78 @@ describe("regenerateDirectory", () => {
     expect(profile.pinnedPost).toBeDefined();
   });
 
+  it("creates the graph.list once and adds a listitem per completed case", async () => {
+    const { agent, records } = fakeAgent();
+    // Add a second completed case so two listitems are expected.
+    const l = recordCase(
+      {
+        cases: {
+          "1": {
+            did: "did:plc:case1",
+            handle: "case1.rcape.org",
+            password: "pw",
+            createdAt: "2026-06-10T00:00:00.000Z",
+            completed: true,
+          },
+        },
+        quota: { day: "", counts: {} },
+      },
+      2,
+      {
+        did: "did:plc:case2",
+        handle: "case2.rcape.org",
+        password: "pw",
+        createdAt: "2026-06-11T00:00:00.000Z",
+        completed: true,
+      } as CaseEntry,
+    );
+    await saveLedger(ledgerPath, l);
+
+    await regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
+      ok: true,
+    }));
+
+    // The list record exists at the fixed rkey, as a curatelist.
+    const list = records.get("app.bsky.graph.list/shelf") as {
+      purpose: string;
+      name: string;
+    };
+    expect(list.purpose).toBe("app.bsky.graph#curatelist");
+    expect(list.name).toContain("R.C. Ape");
+    // One listitem per completed case, each pointing at the deterministic list URI.
+    const items = [...records.entries()].filter(([k]) =>
+      k.startsWith("app.bsky.graph.listitem/"),
+    );
+    expect(items).toHaveLength(2);
+    const subjects = items.map(([, v]) => (v as { subject: string }).subject);
+    expect(subjects.sort()).toEqual(["did:plc:case1", "did:plc:case2"]);
+    expect((items[0]?.[1] as { list: string }).list).toBe(
+      "at://did:plc:bot/app.bsky.graph.list/shelf",
+    );
+  });
+
+  it("does not duplicate listitems or recreate the list on a second run", async () => {
+    const { agent, records } = fakeAgent();
+    const run = () =>
+      regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
+        ok: true,
+      }));
+    await run();
+    const listCreatedAt = (
+      records.get("app.bsky.graph.list/shelf") as { createdAt: string }
+    ).createdAt;
+    await run();
+    const items = [...records.keys()].filter((k) =>
+      k.startsWith("app.bsky.graph.listitem/"),
+    );
+    expect(items).toHaveLength(1); // the single completed case, not duplicated
+    // The list record was not rewritten (same createdAt).
+    expect(
+      (records.get("app.bsky.graph.list/shelf") as { createdAt: string })
+        .createdAt,
+    ).toBe(listCreatedAt);
+  });
+
   it("never throws when the gist call rejects (best-effort)", async () => {
     const { agent } = fakeAgent();
     const gistFn = vi.fn(async (): Promise<GistUpdateResult> => {
