@@ -73,11 +73,13 @@ export interface Ledger {
 // CourtListener free tier: 125 requests/day per token.
 export const DAILY_CAP = 125;
 
-// CL's per-token throttle windows for the docket endpoints, verified live
-// 2026-06-17 (the 429 body literally reads "Rate limit exceeded: 5/min"). These
-// are DRF SCOPED throttles, stricter than the 5000/hr headline that governs other
-// scopes. `cap` is the max requests CL allows within `windowMs`. The 24h window
-// is the rolling form of DAILY_CAP — what our calendar counter approximates badly.
+// CL's per-token throttle windows for the docket endpoints. Only the 5/min cap is
+// verified live (2026-06-17: the 429 body literally reads "Rate limit exceeded:
+// 5/min"); the 50/hr and 125/24h figures are from CL docs / inferred, not yet
+// observed in a 429 body. These are DRF SCOPED throttles, stricter than the
+// 5000/hr headline that governs other scopes. `cap` is the max requests CL allows
+// within `windowMs`. The 24h window is the rolling form of DAILY_CAP — what our
+// calendar counter approximates badly.
 const CL_RATE_WINDOWS: ReadonlyArray<{ windowMs: number; cap: number }> = [
   { windowMs: 60_000, cap: 5 }, // 5/min
   { windowMs: 3_600_000, cap: 50 }, // 50/hr
@@ -241,6 +243,16 @@ export function markTokenThrottled(
 // that have aged out of the 24h window so the log stays bounded. Timestamps are
 // kept ascending. Charged from the real `requestCount` AFTER a fetch (not the
 // upfront reservation) so the log reflects calls CL actually saw.
+//
+// Accepted crash-window gap: the rolling log is written only on reconcile (after
+// the fetch resolves/throttles), while the CALENDAR quota is reserved upfront. A
+// process crash mid-fetch therefore loses the rolling-log entries for that
+// fetch's calls — but the calendar reservation persisted, so the next
+// selectToken still defers on the calendar counter; the rolling gate just
+// under-counts until the window rolls. We tolerate this (vs. recording the
+// reservation upfront) because the upfront count would over-count on the common
+// case where a case needs fewer than RESERVED calls, permanently inflating the
+// rolling log with phantom calls that never age out correctly.
 export function recordCalls(
   ledger: Ledger,
   token: string,
@@ -252,6 +264,29 @@ export function recordCalls(
   const kept = (ledger.calls?.[id] ?? []).filter((t) => t > cutoff);
   for (let i = 0; i < n; i++) kept.push(nowMs);
   return { ...ledger, calls: { ...ledger.calls, [id]: kept } };
+}
+
+// Charge the calendar quota AND append to the rolling 24h log in one step, so the
+// two accountings can never be updated apart (a dropped recordCalls was the
+// 2026-06-16 freeze). `calls` is the requests CL actually saw — all of them land
+// in the rolling log. `reserved` is any amount already charged to the calendar
+// quota upfront (a provision/monitor reservation), so only the delta
+// `calls - reserved` is charged to the calendar counter here; pass 0 (the default)
+// for a single uncharged call (the bot's search sites).
+export function chargeAndRecord(
+  ledger: Ledger,
+  calls: number,
+  day: string,
+  token: string,
+  nowMs: number,
+  reserved = 0,
+): Ledger {
+  return recordCalls(
+    chargeQuota(ledger, calls - reserved, day, token),
+    token,
+    nowMs,
+    calls,
+  );
 }
 
 // The earliest time (ms epoch) at which `count` requests in the window of width
@@ -306,7 +341,7 @@ export function rollingStartableAt(
 }
 
 // Pick the first configured token with at least `need` requests left today AND
-// not in a hourly-throttle cooldown AND whose rolling 5/min·50/hr·125/24h windows
+// not in an hourly-throttle cooldown AND whose rolling 5/min·50/hr·125/24h windows
 // are open right now, or undefined when none qualifies. A single case must run
 // end-to-end on ONE token (CL pagination carries the token), so headroom can't be
 // pooled across tokens — we need one token that can cover the whole case. Pass

@@ -37,7 +37,11 @@ export async function updateGist(
       body: JSON.stringify({ files: { [filename]: { content } } }),
     });
     if (!res.ok) {
-      return { ok: false, error: `gist PATCH ${res.status}` };
+      // Include a slice of the body so 401 (bad/expired token) is distinguishable
+      // from 404 (bad gist id) in the log — the two failure modes need different
+      // fixes and the bare status hid which one fired.
+      const body = (await res.text().catch(() => "")).slice(0, 120);
+      return { ok: false, error: `gist PATCH ${res.status} ${body}`.trim() };
     }
     return { ok: true };
   } catch (e) {

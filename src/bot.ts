@@ -19,13 +19,12 @@ import { type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
 import {
   type Ledger,
-  chargeQuota,
+  chargeAndRecord,
   findCase,
   loadLedger,
   markTokenThrottled,
   mutateLedger,
   quotaRemaining,
-  recordCalls,
   rollingStartableAt,
   selectToken,
   throttledUntilMs,
@@ -103,6 +102,19 @@ const ANNOUNCEMENT_MARKER = /announcing\s+r\.?\s*c\.?\s*ape/i;
 // CL hiccup is given time to recover without head-of-line blocking the queue.
 const MAX_PROVISION_RETRIES = 3;
 const RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
+
+// A GitHub gist id is a 20–40 char hex string. Reject anything else at startup so
+// a typo'd RCAPE_DIRECTORY_GIST_ID is caught (and the gist push skipped) instead
+// of PATCHing /gists/<garbage> on every regenerate.
+const GIST_ID_RE = /^[a-f0-9]{20,40}$/i;
+function validGistId(id: string | undefined): string | undefined {
+  if (id === undefined || id === "") return undefined;
+  if (GIST_ID_RE.test(id)) return id;
+  console.error(
+    `directory: RCAPE_DIRECTORY_GIST_ID is not a valid gist id (${id}); skipping the gist table`,
+  );
+  return undefined;
+}
 
 function backoffMs(retryCount: number): number {
   const i = Math.min(Math.max(0, retryCount - 1), RETRY_BACKOFF_MS.length - 1);
@@ -441,12 +453,7 @@ async function classifyMention(
       );
       if (token) {
         await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
-          recordCalls(
-            chargeQuota(fresh, 1, today(), token),
-            token,
-            Date.now(),
-            1,
-          ),
+          chargeAndRecord(fresh, 1, today(), token, Date.now()),
         );
         // courtId scopes bankruptcy numbers (which collide across courts) to one
         // docket; it's null for the self-unique district format, leaving that
@@ -488,15 +495,10 @@ async function classifyMention(
       if (token) {
         // Charge the search call before issuing it, same crash-safe direction
         // as provisioning's reservation: a crash mid-search wastes 1 budgeted
-        // call rather than leaving an unaccounted one. recordCalls logs it to the
-        // rolling window too, so the next selectToken sees this spend.
+        // call rather than leaving an unaccounted one. chargeAndRecord logs it to
+        // the rolling window too, so the next selectToken sees this spend.
         await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
-          recordCalls(
-            chargeQuota(fresh, 1, today(), token),
-            token,
-            Date.now(),
-            1,
-          ),
+          chargeAndRecord(fresh, 1, today(), token, Date.now()),
         );
         const res = await deps
           .searchDockets(hint.caption, hint.courtId ?? undefined, token)
@@ -822,11 +824,13 @@ async function main(): Promise<void> {
     zoneId: env("CLOUDFLARE_ZONE_ID"),
     ledgerPath: fileURLToPath(new URL("../data/ledger.json", import.meta.url)),
     cacheDir: fileURLToPath(new URL("../data/case-cache", import.meta.url)),
-    // Public-directory gist (optional). Both must be set to push the table; the
-    // graph.list runs regardless (bot self-auth only). The token is a PropterMalone
-    // gist-scoped PAT; the id is the shelf gist created once under PropterMalone.
+    // Public-directory gist (optional). The gist table needs BOTH a token and an
+    // id; the graph.list runs regardless (bot self-auth only). The token is a
+    // PropterMalone gist-scoped PAT; the id is the shelf gist created once under
+    // PropterMalone. A malformed id is dropped here (warned) so the directory
+    // skips the gist rather than PATCHing a bogus /gists/<garbage> path.
     gistToken: process.env.RCAPE_GIST_TOKEN,
-    gistId: process.env.RCAPE_DIRECTORY_GIST_ID,
+    gistId: validGistId(process.env.RCAPE_DIRECTORY_GIST_ID),
   };
   const ownerHandle = env("RCAPE_OWNER_HANDLE");
   // Resolve the owner handle to a DID once at startup for the @proptermalone

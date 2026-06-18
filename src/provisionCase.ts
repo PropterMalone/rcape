@@ -29,11 +29,11 @@ import { deriveHandle } from "./handle.js";
 import {
   type CaseEntry,
   type Ledger,
+  chargeAndRecord,
   chargeQuota,
   findCase,
   loadLedger,
   mutateLedger,
-  recordCalls,
   recordCase,
   selectToken,
   takenHandles,
@@ -219,11 +219,13 @@ async function reconcileQuota(
 ): Promise<Ledger> {
   const nowMs = Date.now();
   return mutateLedger(ledgerPath, (fresh) =>
-    recordCalls(
-      chargeQuota(fresh, actualCalls - RESERVED_CALLS_PER_CASE, day, token),
+    chargeAndRecord(
+      fresh,
+      actualCalls,
+      day,
       token,
       nowMs,
-      actualCalls,
+      RESERVED_CALLS_PER_CASE,
     ),
   );
 }

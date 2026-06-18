@@ -27,8 +27,10 @@ describe("updateGist", () => {
     });
   });
 
-  it("returns ok:false (does not throw) on a non-2xx response", async () => {
-    const fetchImpl = vi.fn(async () => new Response("nope", { status: 404 }));
+  it("returns ok:false with the status AND body slice (so 401 vs 404 is distinguishable)", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("Not Found: no such gist", { status: 404 }),
+    );
     const res = await updateGist(
       "t",
       "g",
@@ -38,6 +40,8 @@ describe("updateGist", () => {
     );
     expect(res.ok).toBe(false);
     expect(res.error).toContain("404");
+    // The body distinguishes a bad id (404) from a bad token (401) in the log.
+    expect(res.error).toContain("Not Found: no such gist");
   });
 
   it("returns ok:false (does not throw) when fetch rejects", async () => {

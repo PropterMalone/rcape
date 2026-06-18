@@ -16,10 +16,10 @@ import { type FireResult, postEntries } from "./fire.js";
 import {
   type CaseEntry,
   type Ledger,
+  chargeAndRecord,
   chargeQuota,
   loadLedger,
   mutateLedger,
-  recordCalls,
   recordCase,
   selectToken,
 } from "./ledger.js";
@@ -118,17 +118,12 @@ export async function monitorOnce(
   let checked = 0;
   let updated = 0;
   // Reconcile the monitor's reservation to the calls actually spent AND append
-  // them to the rolling 24h log (recordCalls) — same dual accounting as
-  // runProvision's reconcileQuota, so the next selectToken predicts CL's rolling
-  // windows instead of eating a 429.
+  // them to the rolling 24h log in one atomic step (chargeAndRecord) — same dual
+  // accounting as runProvision's reconcileQuota, so the next selectToken predicts
+  // CL's rolling windows instead of eating a 429.
   const reconcileMonitor = (tok: string, calls: number) =>
     mutateLedger(cfg.ledgerPath, (l) =>
-      recordCalls(
-        chargeQuota(l, calls - MONITOR_RESERVED_CALLS, day, tok),
-        tok,
-        Date.now(),
-        calls,
-      ),
+      chargeAndRecord(l, calls, day, tok, Date.now(), MONITOR_RESERVED_CALLS),
     );
   for (const { docketId, entry } of due) {
     // Budget gate per case (re-read for live quota): only proceed with headroom

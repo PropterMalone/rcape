@@ -2,7 +2,7 @@
 // Regenerates RC Ape's public "shelf" directory from the ledger after a provision
 // (or a monitor add): PATCHes the PropterMalone gist with the markdown table and,
 // once, posts + pins a combined intro that links both the how-it-works and the
-// shelf gist. STRICTLY best-effort — every failure is logged and swallowed so a
+// shelf gist. Best-effort — every failure is logged and swallowed so a
 // gist/atproto hiccup can never fail a provision or its reply. Pure builders live
 // in directory.ts (Functional Core).
 

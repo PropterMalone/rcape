@@ -15,14 +15,21 @@ const BOT_PROFILE = "https://bsky.app/profile/ape.rcape.org";
 
 const EM_DASH = "—";
 
-// Escape the markdown table cell delimiter so a case name containing "|" can't
-// inject extra columns (CL case names do carry pipes occasionally).
+// Sanitize a markdown table cell: escape the column delimiter "|" and the link
+// brackets "[" "]" so a case name can't inject extra columns or a fake link, and
+// collapse CR/LF to a space so a multi-line value can't break the table row.
+// (CL case names carry pipes and the occasional stray newline.)
 function cell(value: string | undefined): string {
   if (value === undefined || value === "") return EM_DASH;
-  return value.replace(/\|/g, "\\|");
+  return value.replace(/\r\n|\r|\n/g, " ").replace(/[|[\]]/g, (c) => `\\${c}`);
 }
 
+// A handle safe to drop into a markdown link target. atproto handles are a subset
+// of [a-z0-9.-]; anything else (an injected "](javascript:…" payload, say) falls
+// back to plain text so the table can't carry a forged link.
+const VALID_HANDLE = /^[a-z0-9.-]+$/;
 function profileLink(handle: string): string {
+  if (!VALID_HANDLE.test(handle)) return cell(handle);
   return `[@${handle}](https://bsky.app/profile/${handle})`;
 }
 
@@ -31,16 +38,26 @@ function profileLink(handle: string): string {
 export function buildDirectoryMarkdown(cases: CaseEntry[]): string {
   const completed = cases
     .filter((c) => c.completed)
-    // Descending createdAt (newest shelved first). localeCompare on ISO strings
-    // orders chronologically; reversed for newest-first.
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // Descending createdAt (newest shelved first). ISO-8601 strings sort
+    // lexicographically in chronological order, so a plain `<`/`>` compare is both
+    // correct and faster than localeCompare (no collator).
+    .sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
 
-  const rows = completed.map(
-    (c) =>
-      `| ${cell(c.caseName)} | ${cell(c.courtName)} | ${cell(c.docketNumber)} | ${profileLink(
-        c.handle,
-      )} | ${c.filings ?? EM_DASH} |`,
-  );
+  const rows =
+    completed.length > 0
+      ? completed.map(
+          (c) =>
+            `| ${cell(c.caseName)} | ${cell(c.courtName)} | ${cell(c.docketNumber)} | ${profileLink(
+              c.handle,
+            )} | ${c.filings ?? EM_DASH} |`,
+        )
+      : // A placeholder row keeps the table well-formed (and reads better than an
+        // empty body) until the first docket is shelved.
+        [
+          `| ${EM_DASH} | ${EM_DASH} | ${EM_DASH} | _No dockets shelved yet_ | ${EM_DASH} |`,
+        ];
 
   const count = completed.length;
   const noun = count === 1 ? "docket" : "dockets";

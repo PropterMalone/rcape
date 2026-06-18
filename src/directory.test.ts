@@ -61,6 +61,26 @@ describe("buildDirectoryMarkdown", () => {
     expect(md).not.toContain("| A | B Corp |"); // raw pipe would add a column
   });
 
+  it("escapes link brackets and collapses newlines in a cell (no injected link or broken row)", () => {
+    const md = buildDirectoryMarkdown([
+      entry({
+        caseName: "Evil [x](javascript:alert(1))\nsecond line",
+        handle: "evil.rcape.org",
+      }),
+    ]);
+    expect(md).toContain("Evil \\[x\\](javascript:alert(1)) second line");
+    expect(md).not.toContain("\n second line\n"); // newline collapsed to a space
+  });
+
+  it("falls back to plain text for a handle that isn't a valid atproto handle", () => {
+    const md = buildDirectoryMarkdown([
+      entry({ handle: "evil](javascript:alert(1))" }),
+    ]);
+    // No forged markdown link target for an invalid handle.
+    expect(md).not.toContain("(https://bsky.app/profile/evil]");
+    expect(md).toContain("javascript:alert(1)"); // shown, but escaped, as text
+  });
+
   it("falls back to an em dash for fields missing on pre-card entries", () => {
     const md = buildDirectoryMarkdown([
       entry({
@@ -78,10 +98,12 @@ describe("buildDirectoryMarkdown", () => {
     expect(md).toContain("—");
   });
 
-  it("returns a non-empty header even with zero completed cases", () => {
+  it("returns a non-empty header AND a placeholder row with zero completed cases", () => {
     const md = buildDirectoryMarkdown([]);
     expect(md).toContain("R.C. Ape"); // title still present
     expect(md).toContain("| Case | Court | Docket # | Account | Filings |");
+    // A placeholder row keeps the table well-formed instead of an empty body.
+    expect(md).toContain("_No dockets shelved yet_");
   });
 });
 

@@ -154,6 +154,7 @@ function toMention(n: RawNotification): MentionNotif {
 // this admits is suppressed downstream by `source`, not here.
 const COLLECTED_REASONS = new Set(["mention", "reply"]);
 const PAGE_GUARD = 50; // hard ceiling on pages so a server cursor bug can't loop forever
+const LIST_PAGE_GUARD = 50; // same ceiling for listRecords pagination
 export async function paginateMentions(
   fetchPage: (cursor?: string) => Promise<ListNotificationsPage>,
   opts: ListMentionsOpts = {},
@@ -294,6 +295,7 @@ export async function createBotAgent(opts: {
     async listRecords(collection): Promise<{ uri: string; value: unknown }[]> {
       const out: { uri: string; value: unknown }[] = [];
       let cursor: string | undefined;
+      let guard = 0;
       do {
         const { data } = await agent.com.atproto.repo.listRecords({
           repo: did,
@@ -303,7 +305,9 @@ export async function createBotAgent(opts: {
         });
         for (const r of data.records) out.push({ uri: r.uri, value: r.value });
         cursor = data.cursor;
-      } while (cursor);
+        // Hard ceiling (like paginateMentions) so a server cursor bug can't loop
+        // forever: 50 pages × 100 = 5000 records, far beyond any real collection.
+      } while (cursor && ++guard < LIST_PAGE_GUARD);
       return out;
     },
   };

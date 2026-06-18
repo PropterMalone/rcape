@@ -2,7 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type DirectoryAgent, regenerateDirectory } from "./directorySync.js";
+import {
+  type DirectoryAgent,
+  LIST_RKEY,
+  regenerateDirectory,
+} from "./directorySync.js";
 import type { GistUpdateResult } from "./gistClient.js";
 import { type CaseEntry, recordCase, saveLedger } from "./ledger.js";
 
@@ -203,7 +207,7 @@ describe("regenerateDirectory", () => {
     }));
 
     // The list record exists at the fixed rkey, as a curatelist.
-    const list = records.get("app.bsky.graph.list/shelf") as {
+    const list = records.get(`app.bsky.graph.list/${LIST_RKEY}`) as {
       purpose: string;
       name: string;
     };
@@ -217,7 +221,7 @@ describe("regenerateDirectory", () => {
     const subjects = items.map(([, v]) => (v as { subject: string }).subject);
     expect(subjects.sort()).toEqual(["did:plc:case1", "did:plc:case2"]);
     expect((items[0]?.[1] as { list: string }).list).toBe(
-      "at://did:plc:bot/app.bsky.graph.list/shelf",
+      `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
     );
   });
 
@@ -229,7 +233,7 @@ describe("regenerateDirectory", () => {
       }));
     await run();
     const listCreatedAt = (
-      records.get("app.bsky.graph.list/shelf") as { createdAt: string }
+      records.get(`app.bsky.graph.list/${LIST_RKEY}`) as { createdAt: string }
     ).createdAt;
     await run();
     const items = [...records.keys()].filter((k) =>
@@ -238,7 +242,7 @@ describe("regenerateDirectory", () => {
     expect(items).toHaveLength(1); // the single completed case, not duplicated
     // The list record was not rewritten (same createdAt).
     expect(
-      (records.get("app.bsky.graph.list/shelf") as { createdAt: string })
+      (records.get(`app.bsky.graph.list/${LIST_RKEY}`) as { createdAt: string })
         .createdAt,
     ).toBe(listCreatedAt);
   });
@@ -269,19 +273,19 @@ describe("regenerateDirectory", () => {
     const { agent, records } = fakeAgent();
     // Pre-seed the list + a stale listitem pointing at a superseded account (the
     // old DID a --force re-provision archived) plus the still-current case1.
-    records.set("app.bsky.graph.list/shelf", {
+    records.set(`app.bsky.graph.list/${LIST_RKEY}`, {
       $type: "app.bsky.graph.list",
       createdAt: "2026-06-01T00:00:00.000Z",
     });
     records.set("app.bsky.graph.listitem/stale", {
       $type: "app.bsky.graph.listitem",
       subject: "did:plc:superseded",
-      list: "at://did:plc:bot/app.bsky.graph.list/shelf",
+      list: `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
     });
     records.set("app.bsky.graph.listitem/keep", {
       $type: "app.bsky.graph.listitem",
       subject: "did:plc:case1",
-      list: "at://did:plc:bot/app.bsky.graph.list/shelf",
+      list: `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
     });
     // The ledger's only completed case is case1 (seeded in beforeEach).
     await regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({

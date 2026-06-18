@@ -6,6 +6,7 @@ import {
   type CaseEntry,
   DAILY_CAP,
   type Ledger,
+  chargeAndRecord,
   chargeQuota,
   emptyLedger,
   findCase,
@@ -396,6 +397,21 @@ describe("rolling-window call log (predictive 5/min·50/hr·125/24h gate)", () =
     const t0 = NOW - 23 * HR;
     const l = recordCalls(emptyLedger(), TOK, t0, 120);
     expect(rollingStartableAt(l, TOK, 12, NOW)).toBe(NOW + HR);
+  });
+
+  it("chargeAndRecord charges the calendar delta and records ALL calls atomically", () => {
+    // A monitor/provision reconcile: 8 calls actually spent, 5 reserved upfront.
+    // Calendar quota gets the delta (8 - 5 = 3); the rolling log gets all 8.
+    const reserved = chargeQuota(emptyLedger(), 5, DAY, TOK); // upfront reservation
+    const after = chargeAndRecord(reserved, 8, DAY, TOK, NOW, 5);
+    expect(after.quota.counts[tokenId(TOK)]).toBe(8); // 5 reserved + 3 delta
+    expect(after.calls?.[tokenId(TOK)]?.length).toBe(8); // all 8 in the rolling log
+  });
+
+  it("chargeAndRecord with no reservation charges and records the same N (the search sites)", () => {
+    const after = chargeAndRecord(emptyLedger(), 1, DAY, TOK, NOW);
+    expect(after.quota.counts[tokenId(TOK)]).toBe(1);
+    expect(after.calls?.[tokenId(TOK)]?.length).toBe(1);
   });
 
   it("selectToken honors the rolling gate only when nowMs is supplied (the root-cause fix)", () => {
