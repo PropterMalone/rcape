@@ -503,15 +503,29 @@ async function classifyMention(
         const res = await deps
           .searchDockets(hint.caption, hint.courtId ?? undefined, token)
           .catch(() => null);
-        if (res && res.count === 1 && res.results[0]) {
-          parsed = { docketId: res.results[0].docket_id };
-        } else if (res) {
+        if (res) {
+          // A Gemini caption is a guess, never a hard signal — even ONE match can
+          // be a wrong same-name docket (a Joe-Biden news post resolved to the
+          // terminated Hunter-Biden-IRS case). So the caption path NEVER
+          // auto-provisions: count 0/1/≥2 all clarify with the requester. Hard
+          // signals (a link, or a parsed docket NUMBER above) still provision.
+          // On count===1 show what we actually FOUND (the matched caseName), not
+          // the guess, so the confirm reply names the real candidate.
+          const matched = res.count === 1 ? res.results[0] : undefined;
+          console.log(
+            `Caption inference: guess=${JSON.stringify(hint.caption)} courtId=${hint.courtId ?? "none"} count=${res.count} — degrading to clarify (no auto-provision from a name guess)`,
+          );
           return {
             kind: "reply-suggest",
-            caption: hint.caption,
+            caption: matched?.caseName ?? hint.caption,
             matches: res.count,
           };
         }
+        // res === null (no result or search error) falls through to the
+        // no-docket path below — the requester is asked for a link.
+        console.log(
+          `Caption inference: guess=${JSON.stringify(hint.caption)} courtId=${hint.courtId ?? "none"} count=search-failed — degrading to clarify (no auto-provision from a name guess)`,
+        );
       }
     }
   }

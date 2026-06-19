@@ -135,6 +135,20 @@ describe("buildReply", () => {
     expect(text.toLowerCase()).toContain("did you mean");
   });
 
+  it("confirms (singular, won't-shelve framing) when the caption matched exactly one docket", () => {
+    const text = buildReply({
+      kind: "suggest",
+      caption: "Heritage Foundation v. DOJ",
+      matches: 1,
+    });
+    expect(text).toContain("Heritage Foundation v. DOJ");
+    expect(text.toLowerCase()).toContain(
+      "won't shelve a case from a name guess",
+    );
+    // Singular confirm framing, not the ambiguous "did you mean … N dockets".
+    expect(text.toLowerCase()).not.toContain("did you mean");
+  });
+
   it("clamps a long guessed caption while keeping the reply under the post limit", () => {
     const text = buildReply({
       kind: "suggest",

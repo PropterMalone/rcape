@@ -71,6 +71,18 @@ export function parseCaseNumber(text: string): string | null {
   return m?.[1] ? m[1].toLowerCase() : null;
 }
 
+// A bare district-style number with NO office prefix and NO zero-padding, e.g.
+// "24-cv-645" — the shape a person types from memory ("No. 24-cv-645 (DLF)").
+// `<2-4-digit year>-<type>-<1-6-digit seq>`, type ∈ the federal docket codes.
+// Word-boundaried so it can't match inside a larger token; the negative
+// lookbehind `(?<![:\d])` rejects the unprefixed tail of an office-prefixed
+// number (the "24-cv-00645" inside "1:24-cv-00645") and the trailing-digit part
+// of a version like "v1.18.0". A bare number is globally ambiguous (CL returns
+// many) — the caller's count===1 gate handles that — but parsing it stops a real
+// case number from falling into the caption name-guess path.
+const BARE_CASE_NUMBER =
+  /(?<![:\d])\b(\d{2,4}-(?:cv|cr|md|mc|mj|bk)-\d{1,6})\b/i;
+
 // Split free text (or a Bluebook label) into lowercase alphanumeric tokens.
 // Used by both sides of the court reverse-lookup so "Bankr. D. Conn." and a
 // label normalize identically — every "." / space / the lone U+2019 apostrophe
@@ -148,6 +160,11 @@ export function parseCaseRef(
 ): { caseNumber: string; courtId: string | null } | null {
   const district = parseCaseNumber(text);
   if (district) return { caseNumber: district, courtId: null };
+  // A bare unprefixed district number ("24-cv-645"): unscoped, same as the
+  // office-prefixed form. We don't derive a court from a trailing judge
+  // parenthetical ("(DLF)") — initials don't map to a court reliably.
+  const bare = text.match(BARE_CASE_NUMBER);
+  if (bare?.[1]) return { caseNumber: bare[1].toLowerCase(), courtId: null };
   const bk = text.match(BK_NUMBER);
   if (bk?.[1]) {
     const courtId = parseCourt(text);

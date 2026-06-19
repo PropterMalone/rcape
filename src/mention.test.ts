@@ -94,6 +94,29 @@ describe("parseCaseRef", () => {
   it("returns null when there is neither a case number nor a court", () => {
     expect(parseCaseRef("@ape please add the Anthropic case")).toBeNull();
   });
+
+  it("accepts a bare district-style number (no office prefix, no zero-padding) and a trailing judge parenthetical", () => {
+    // The misdetection driver: owner replied "No. 24-cv-645 (DLF)" to correct a
+    // bad caption guess. The bare unprefixed number must parse so it doesn't fall
+    // back to the name-guess path. Judge initials are ignored (no court derived).
+    expect(parseCaseRef("No. 24-cv-645 (DLF)")).toEqual({
+      caseNumber: "24-cv-645",
+      courtId: null,
+    });
+  });
+
+  it("accepts a bare unprefixed number on its own", () => {
+    expect(parseCaseRef("24-cv-645")).toEqual({
+      caseNumber: "24-cv-645",
+      courtId: null,
+    });
+  });
+
+  it("does NOT falsely parse a version string or a partial token as a case number", () => {
+    // "v1.18.0" and "2024-cv" must not match the bare format (no seq / not bounded).
+    expect(parseCaseRef("running v1.18.0 here")).toBeNull();
+    expect(parseCaseRef("a 2024-cv thread")).toBeNull();
+  });
 });
 
 describe("parseDocketId", () => {

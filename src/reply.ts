@@ -91,10 +91,16 @@ export function buildReply(r: ReplyKind): string {
     case "suggest":
       // The guessed caption shows the requester what the Librarian understood,
       // so a wrong guess is self-explanatory and the fix (a link) is obvious.
-      text =
-        r.matches === 0
-          ? `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Reply with the CourtListener docket link and I'll fetch it.`
-          : `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Reply with the CourtListener link for yours and I'll fetch it.`;
+      if (r.matches === 0) {
+        text = `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Reply with the CourtListener docket link and I'll fetch it.`;
+      } else if (r.matches === 1) {
+        // Exactly one match, but it came from a name guess — a same-name docket
+        // can be the wrong one (a Joe-Biden post → the Hunter-Biden-IRS case), so
+        // confirm rather than shelve. Singular grammar, confirm framing.
+        text = `Ook — I think you mean ${truncate(r.caption, NAME_BUDGET)}, but I won't shelve a case from a name guess. If that's the one, reply with its CourtListener link and I'll fetch it; if not, send the right link.`;
+      } else {
+        text = `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Reply with the CourtListener link for yours and I'll fetch it.`;
+      }
       break;
     case "not-found":
       text =

@@ -1794,7 +1794,7 @@ describe("prose inference (v1b)", () => {
     }
   });
 
-  it("provisions on an exactly-one search match, charging exactly 1 CL call for the search", async () => {
+  it("CLARIFIES (never auto-provisions) on an exactly-one caption match, charging exactly 1 CL call for the search", async () => {
     const inferCase = vi.fn(async () => hint);
     const searchDockets = vi.fn(async () => oneMatch);
     const r = await run({ inferCase, searchDockets });
@@ -1806,13 +1806,16 @@ describe("prose inference (v1b)", () => {
         "mdd",
         "t",
       );
-      // Full ack + provision cycle on the searched docket id.
-      expect(r.replies).toHaveLength(2);
-      expect(r.replies[0]?.text).toContain("69777799");
-      expect(r.replies[1]?.text).toContain("@abrego-garcia.rcape.org");
-      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
-      // The search charged exactly 1 against the day's 125 (provision is
-      // stubbed, so nothing else charges).
+      // A name guess never shelves — even one match clarifies with the requester.
+      expect(r.replies).toHaveLength(1);
+      // The confirm reply names the MATCHED caseName (what was found), not just
+      // the guess, and uses the singular confirm framing.
+      expect(r.replies[0]?.text).toContain("Abrego Garcia v. Noem");
+      expect(r.replies[0]?.text.toLowerCase()).toContain(
+        "won't shelve a case from a name guess",
+      );
+      expect(r.queue.jobs).toHaveLength(0);
+      // The search charged exactly 1 against the day's 125.
       expect(quotaRemaining(r.ledger, todayStr, "t")).toBe(124);
     } finally {
       await r.cleanup();
@@ -1923,7 +1926,11 @@ describe("prose inference (v1b)", () => {
     }
   });
 
-  it("applies the already-provisioned dedupe to a search-derived docket id", async () => {
+  it("CLARIFIES (does not auto-shelve) even when the caption match is already provisioned", async () => {
+    // The caption path no longer derives a docketId, so it can't dedupe to
+    // "already in the stacks" from a name guess — it always clarifies. (This is
+    // the second bug from the misdetection: a re-guess hit a shelved wrong case
+    // and falsely replied "already in the stacks".)
     const r = await run({
       inferCase: async () => hint,
       searchDockets: async () => oneMatch,
@@ -1938,14 +1945,16 @@ describe("prose inference (v1b)", () => {
     });
     try {
       expect(r.replies).toHaveLength(1);
-      expect(r.replies[0]?.text).toContain("@abrego-garcia.rcape.org");
+      expect(r.replies[0]?.text.toLowerCase()).toContain(
+        "won't shelve a case from a name guess",
+      );
       expect(r.queue.jobs).toHaveLength(0);
     } finally {
       await r.cleanup();
     }
   });
 
-  it("infers from the mention text alone on a top-level mention (no thread)", async () => {
+  it("infers from the mention text alone on a top-level mention (no thread), then clarifies", async () => {
     const inferCase = vi.fn(async () => hint);
     const r = await run({
       inferCase,
@@ -1959,6 +1968,53 @@ describe("prose inference (v1b)", () => {
       ];
       expect(mentionText).toContain("Abrego Garcia");
       expect(entries).toHaveLength(0);
+      // Name guess → clarify, never shelve.
+      expect(r.queue.jobs).toHaveLength(0);
+      expect(r.replies[0]?.text.toLowerCase()).toContain(
+        "won't shelve a case from a name guess",
+      );
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("GUARD: the docket-NUMBER path still auto-provisions on count===1 (FIX 1 must not over-broaden)", async () => {
+    const searchByDocketNumber = vi.fn(async () => oneMatch);
+    const r = await run({
+      mention: caseNumberMention(),
+      thread: null,
+      inferCase: vi.fn(async () => hint),
+      searchDockets: vi.fn(async () => null),
+      searchByDocketNumber,
+    });
+    try {
+      // ack + provisioned — a parsed docket NUMBER is a hard signal, still shelves.
+      expect(r.replies).toHaveLength(2);
+      expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("GUARD: a direct docket LINK still auto-provisions (FIX 1 must not over-broaden)", async () => {
+    const inferCase = vi.fn(async () => hint);
+    const r = await run({
+      mention: {
+        uri: "m-link",
+        cid: "cl",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "@ape.rcape.org https://www.courtlistener.com/docket/69777799/x/",
+        root: { uri: "m-root", cid: "cr" },
+      },
+      thread: null,
+      inferCase,
+      searchDockets: vi.fn(async () => null),
+    });
+    try {
+      // A link is a hard signal: inference never runs, the case is shelved.
+      expect(inferCase).not.toHaveBeenCalled();
+      expect(r.replies).toHaveLength(2);
       expect(r.queue.jobs[0]?.docketId).toBe(69777799);
     } finally {
       await r.cleanup();
