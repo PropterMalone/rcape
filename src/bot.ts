@@ -942,8 +942,17 @@ async function main(): Promise<void> {
       : {}),
   };
   if (geminiKey) console.log(`prose case-inference armed (${geminiModel}).`);
-  if (watchlistUri)
-    console.log(`watchlist sweeper armed (list ${watchlistUri}).`);
+  if (watchlistUri) {
+    const wlThreshold = Number(process.env.RCAPE_WATCHLIST_THRESHOLD ?? 1);
+    console.log(
+      `watchlist sweeper armed (list ${watchlistUri}, threshold ${wlThreshold}).`,
+    );
+    if (wlThreshold <= 1) {
+      console.warn(
+        "watchlist: threshold=1 — any single list member linking a docket trips a provision; raise RCAPE_WATCHLIST_THRESHOLD to 2+ as the list grows.",
+      );
+    }
+  }
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);

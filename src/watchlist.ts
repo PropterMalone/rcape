@@ -248,12 +248,16 @@ export async function watchlistSweepOnce(
   for (const { docketId, accounts } of tripped) {
     if (attempts >= maxPerCycle) break;
 
-    // Re-read fresh for live quota + the latest case set (a concurrent drain may
-    // have just shelved this docket).
+    // Cheap pre-check against the cadence-read ledger: skip dockets the bot already
+    // knew at sweep start WITHOUT a per-docket disk read. A feed mostly re-surfaces
+    // already-shelved cases, so this avoids a loadLedger per known docket. The case
+    // set only grows, so a stale-but-present hit here is still correctly a skip.
+    if (findCase(ledger0, docketId)) continue;
+
+    // Re-read fresh for live quota + a concurrent drain that may have shelved this
+    // docket since the sweep began. (findCase covers completed and in-flight alike,
+    // so the sweeper never resumes someone else's half-done work.)
     const fresh = await loadLedger(cfg.ledgerPath);
-    // Skip ANY docket the bot already knows — the watchlist discovers NEW cases;
-    // the drain + monitor own existing/zombie ones. (findCase covers completed and
-    // in-flight alike, so the sweeper never resumes someone else's half-done work.)
     if (findCase(fresh, docketId)) continue;
 
     // Budget floor gate: only spend when a live request's worth of budget remains

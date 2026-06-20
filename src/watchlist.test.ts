@@ -395,4 +395,23 @@ describe("watchlistSweepOnce", () => {
     expect(got.provisioned).toBe(0);
     expect(provision).toHaveBeenCalledTimes(1); // stopped after the first
   });
+
+  it("stops the cycle when a provision reports throttled", async () => {
+    const path = join(dir, "ledger.json");
+    await writeLedger(path);
+    const agent = feedAgent([
+      post({ attributedDid: "did:a", links: [DOCKET_URL(1)] }),
+      post({ attributedDid: "did:b", links: [DOCKET_URL(2)] }),
+    ]);
+    const provision = vi.fn(async () => ({
+      status: "throttled" as const,
+      retryAfterMs: 60_000,
+      token: "t",
+    }));
+    const got = await watchlistSweepOnce(deps(path, agent, provision), {
+      now: () => NOW,
+    });
+    expect(got.provisioned).toBe(0);
+    expect(provision).toHaveBeenCalledTimes(1); // throttle breaks the cycle too
+  });
 });
