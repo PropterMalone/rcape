@@ -129,6 +129,7 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
       seenAts.push(seenAt);
     },
     getPostThread: async () => thread,
+    getListFeed: async () => ({ items: [] }),
     createRecord: async (collection) => ({
       uri: `at://did:bot/${collection}/auto`,
       cid: "c",

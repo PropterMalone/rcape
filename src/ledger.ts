@@ -68,6 +68,10 @@ export interface Ledger {
   // The log lets selectToken/classifyDeferral stop a drain BEFORE the 429 and
   // report the exact reopen time. Pruned to 24h on every record (bounded ≤~125).
   calls?: Record<string, number[]>;
+  // Watchlist sweeper cadence marker. `sweptAt` is the ISO time of the last list
+  // feed read; the sweeper re-reads only after RCAPE_WATCHLIST_INTERVAL_MS, so a
+  // 60s poll loop doesn't hammer the AppView's getListFeed. Absent ⇒ never swept.
+  watchlist?: { sweptAt?: string };
 }
 
 // CourtListener free tier: 125 requests/day per token.
@@ -102,6 +106,12 @@ export function findCase(
   docketId: number,
 ): CaseEntry | undefined {
   return ledger.cases[String(docketId)];
+}
+
+// Stamp the watchlist sweeper's last-feed-read time (pure merge — preserves every
+// other ledger field). Drives the sweeper's cadence gate.
+export function recordWatchlistSwept(ledger: Ledger, iso: string): Ledger {
+  return { ...ledger, watchlist: { ...ledger.watchlist, sweptAt: iso } };
 }
 
 export function recordCase(
@@ -389,6 +399,8 @@ function normalize(parsed: Partial<Ledger>): Ledger {
   // Carry the rolling call log through load/mutate (omitted when absent so legacy
   // ledgers don't grow an empty key). Pruning happens at record time, not here.
   if (parsed.calls) out.calls = parsed.calls;
+  // Carry the watchlist sweeper's cadence marker through load/mutate.
+  if (parsed.watchlist) out.watchlist = parsed.watchlist;
   return out;
 }
 

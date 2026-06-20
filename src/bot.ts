@@ -64,6 +64,7 @@ import {
   collectThreadPosts,
   scanThreadForDocket,
 } from "./thread.js";
+import { type WatchlistConfig, watchlistSweepOnce } from "./watchlist.js";
 
 // Require this much free budget before STARTING a case, so one can't begin,
 // exhaust a token's shared budget partway, and strand itself half-provisioned.
@@ -176,6 +177,9 @@ export interface BotDeps {
   // Seal BlobRef for the reply link-card thumbnail, uploaded once at startup.
   // Optional: absent ⇒ cards render text-only (no thumb).
   cardThumb?: unknown;
+  // Watchlist sweeper config (auto-shelve trending cases). Optional: absent ⇒ the
+  // sweeper is off, the bot is by-request only. Armed by RCAPE_WATCHLIST_URI.
+  watchlist?: WatchlistConfig;
   provision?: (
     docketId: number,
     cfg: ProvisionConfig,
@@ -405,10 +409,25 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     console.error("monitor cycle failed:", e instanceof Error ? e.message : e);
   }
 
+  // Sweep the watchlist (auto-shelve trending cases). Self-gated by cadence +
+  // budget, runs only when a watchlist is configured. Best-effort: a sweep failure
+  // must never abort the poll cycle.
+  let watchlistProvisioned = 0;
+  if (deps.watchlist?.listUri) {
+    try {
+      watchlistProvisioned = (await watchlistSweepOnce(deps)).provisioned;
+    } catch (e) {
+      console.error(
+        "watchlist sweep failed:",
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
   // Regenerate the public directory ONCE per cycle when the shelf changed (a new
-  // provision or monitor-added filings). regenerateDirectory is itself best-effort
-  // and never throws, so this can't abort the cycle.
-  if (provisioned || monitorUpdated > 0) {
+  // provision, monitor-added filings, or a watchlist auto-shelve). regenerate-
+  // Directory is itself best-effort and never throws, so this can't abort the cycle.
+  if (provisioned || monitorUpdated > 0 || watchlistProvisioned > 0) {
     await regenerateDirectory(deps);
   }
 }
@@ -872,6 +891,10 @@ async function main(): Promise<void> {
       `card thumbnail unavailable: ${e instanceof Error ? e.message : e}`,
     );
   }
+  // Watchlist sweeper armed only when a list URI is configured; absent, the bot is
+  // by-request only. Tuning (threshold/interval/cap/floor) reads its own env in
+  // watchlist.ts; here we just carry the list identifier that gates the feature.
+  const watchlistUri = process.env.RCAPE_WATCHLIST_URI;
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
@@ -879,6 +902,7 @@ async function main(): Promise<void> {
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
     ownerDid,
     cardThumb,
+    ...(watchlistUri ? { watchlist: { listUri: watchlistUri } } : {}),
     // Always wired (no Gemini needed): a fresh client per call (no throttle
     // interleaving with a concurrent provision client / no 13s pre-wait).
     searchByDocketNumber: async (caseNumber, courtId, token) => {
@@ -918,6 +942,8 @@ async function main(): Promise<void> {
       : {}),
   };
   if (geminiKey) console.log(`prose case-inference armed (${geminiModel}).`);
+  if (watchlistUri)
+    console.log(`watchlist sweeper armed (list ${watchlistUri}).`);
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);

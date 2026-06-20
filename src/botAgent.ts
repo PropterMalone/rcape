@@ -14,6 +14,7 @@ import {
 } from "./facet.js";
 import type { StrongRef } from "./queue.js";
 import type { ThreadView } from "./thread.js";
+import { type ListFeedResult, attributedDidOf } from "./watchlist.js";
 
 const POST = "app.bsky.feed.post";
 // How many ancestor levels getPostThread returns for thread-scan. depth:0 skips
@@ -84,6 +85,14 @@ export interface BotAgent {
   // docket can still resolve one present in an ancestor or quoted post. Returns
   // the raw thread view (or null when the post is gone); the caller scans it.
   getPostThread(uri: string): Promise<ThreadView | null>;
+  // Read the operator's watchlist (an app.bsky.graph.list) as a feed of recent
+  // posts/reposts by its members, reduced to the docket-attention signal: who
+  // shared what links. An AppView read (no CL quota). Used by the watchlist
+  // sweeper to auto-shelve cases multiple list members are linking.
+  getListFeed(
+    listUri: string,
+    opts?: { limit?: number },
+  ): Promise<ListFeedResult>;
   // Generic record ops on the bot's OWN repo, for the public-directory feature:
   // the graph.list + listitem records and the combined pinned post. createRecord
   // lets the server assign the rkey; putRecord writes at a caller-chosen rkey
@@ -250,6 +259,29 @@ export async function createBotAgent(opts: {
       // structural slice thread.ts walks; the cast is sound (it reads only the
       // fields that exist), and NotFound/Blocked roots scan to no docket.
       return data.thread as unknown as ThreadView;
+    },
+    async getListFeed(listUri, opts): Promise<ListFeedResult> {
+      const { data } = await agent.app.bsky.feed.getListFeed({
+        list: listUri,
+        limit: opts?.limit ?? 100,
+      });
+      const items = data.feed.map((item) => {
+        const post = item.post;
+        // The post record carries facets + the external link-card URL; the bot's
+        // facet helper extracts both (a docket shared as a card is seen too).
+        const record = post.record as RichtextRecord & { text?: string };
+        const reason = item.reason as
+          | { $type?: string; by?: { did?: string } }
+          | undefined;
+        return {
+          attributedDid: attributedDidOf(post.author.did, reason),
+          links: extractPostLinks(record),
+          text: record.text,
+          uri: post.uri,
+          indexedAt: post.indexedAt,
+        };
+      });
+      return { items };
     },
     async createRecord(collection, record): Promise<StrongRef> {
       const res = await agent.com.atproto.repo.createRecord({
