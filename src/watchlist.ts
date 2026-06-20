@@ -49,6 +49,16 @@ const WATCHLIST_MAX_PER_CYCLE = Number(
 // case (~RESERVED_CALLS_PER_CASE=10) PLUS a full live request (MIN_QUOTA_FOR_CASE
 // ≈12) in reserve. Discretionary auto-shelving must never consume the budget a
 // by-request user needs. Stricter than runProvision's own internal gate.
+//
+// SINGLE-TOKEN ASSUMPTION: this gate proves *some* token clears the floor, then
+// runProvision independently re-selects a token (need=RESERVED_CALLS_PER_CASE) and
+// charges it. With ONE token (today's reality — CourtListener's ToS forbids a 2nd
+// token, even via a recruited person) the gate token and the spend token are the
+// same, so the reserve is real. With a hypothetical multi-token pool they could
+// differ: the gate could clear on token B while runProvision spends token A, so the
+// "a by-request user keeps a full case in reserve" guarantee holds only per-token,
+// not pool-wide. If a pool is ever introduced, thread the gate's selected token into
+// runProvision so the spend honors the same floor.
 const WATCHLIST_PROVISION_FLOOR = Number(
   process.env.RCAPE_WATCHLIST_PROVISION_FLOOR ?? 24,
 );
