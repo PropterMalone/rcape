@@ -260,6 +260,21 @@ describe("watchlistSweepOnce", () => {
     expect(provision).not.toHaveBeenCalled();
   });
 
+  it("treats threshold 0 as 1 (defensive clamp, no flood)", async () => {
+    const path = join(dir, "ledger.json");
+    await writeLedger(path);
+    const agent = feedAgent([
+      post({ attributedDid: "did:a", links: [DOCKET_URL(1)] }),
+    ]);
+    const provision = vi.fn(async () => okResult);
+    const got = await watchlistSweepOnce(
+      deps(path, agent, provision, { threshold: 0, maxPerCycle: 5 }),
+      { now: () => NOW },
+    );
+    expect(got.tripped).toBe(1); // same as threshold 1 — clamp holds the floor
+    expect(provision).toHaveBeenCalledTimes(1);
+  });
+
   it("honors the per-cycle cap, shelving the hottest first", async () => {
     const path = join(dir, "ledger.json");
     await writeLedger(path);

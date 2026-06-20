@@ -164,7 +164,12 @@ export async function watchlistSweepOnce(
   const day = nowIso.slice(0, 10);
   const cfg = deps.cfg;
   const interval = wl.intervalMs ?? WATCHLIST_INTERVAL_MS;
-  const threshold = wl.threshold ?? WATCHLIST_THRESHOLD;
+  // Clamp to >=1 as defensive hygiene. (Today threshold 0 already behaves as 1:
+  // a docket only enters the tally when a post links it, so accounts.size is always
+  // >=1 and `>= 0` trips the same set. The clamp guards against a future tally
+  // change where a 0/negative value would mean "match regardless of accounts," and
+  // makes the floor explicit for an operator who sets the var to 0 expecting "off.")
+  const threshold = Math.max(1, wl.threshold ?? WATCHLIST_THRESHOLD);
   const maxPerCycle = wl.maxPerCycle ?? WATCHLIST_MAX_PER_CYCLE;
 
   // Cadence gate: re-read the feed only after a full interval (AppView politeness).
