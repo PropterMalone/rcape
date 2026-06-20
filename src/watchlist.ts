@@ -16,6 +16,7 @@
 // it provisions only with headroom BEYOND a live by-request case, so a trending
 // case never starves someone who actually asked.
 
+import { type RichtextRecord, extractPostLinks } from "./facet.js";
 import {
   findCase,
   loadLedger,
@@ -114,6 +115,40 @@ export function attributedDidOf(
     return reason.by.did;
   }
   return authorDid;
+}
+
+// The raw shape of one app.bsky.feed.getListFeed item that mapListFeedItem reads.
+// Structurally typed (not the full SDK type) so the mapper is unit-testable with
+// plain objects and the SDK's wider union is cast to it at the call site.
+export interface RawListFeedItem {
+  post?: {
+    author?: { did?: string };
+    record?: unknown;
+    uri?: string;
+    indexedAt?: string;
+  };
+  reason?: { $type?: string; by?: { did?: string } };
+}
+
+// pattern: Functional Core
+// Map one list-feed item to a WatchPost, or null when it carries no usable post.
+// A list feed can include deleted/blocked/hydration-failed entries; returning null
+// lets the caller skip them with .filter instead of throwing — so one bad item
+// can't abort the whole feed read (which the sweep's try/catch would swallow,
+// silently suppressing ALL tripping for the cycle). Mirrors getPostThread's
+// NotFound/Blocked tolerance. Pure, so the field-extraction wiring is tested here
+// rather than only through the live AppView.
+export function mapListFeedItem(item: RawListFeedItem): WatchPost | null {
+  const post = item.post;
+  if (!post?.author?.did) return null;
+  const record = (post.record ?? {}) as RichtextRecord & { text?: string };
+  return {
+    attributedDid: attributedDidOf(post.author.did, item.reason),
+    links: extractPostLinks(record),
+    text: record.text,
+    uri: post.uri,
+    indexedAt: post.indexedAt,
+  };
 }
 
 // pattern: Functional Core

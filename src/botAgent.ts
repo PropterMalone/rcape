@@ -14,7 +14,12 @@ import {
 } from "./facet.js";
 import type { StrongRef } from "./queue.js";
 import type { ThreadView } from "./thread.js";
-import { type ListFeedResult, attributedDidOf } from "./watchlist.js";
+import {
+  type ListFeedResult,
+  type RawListFeedItem,
+  type WatchPost,
+  mapListFeedItem,
+} from "./watchlist.js";
 
 const POST = "app.bsky.feed.post";
 // How many ancestor levels getPostThread returns for thread-scan. depth:0 skips
@@ -265,22 +270,12 @@ export async function createBotAgent(opts: {
         list: listUri,
         limit: opts?.limit ?? 100,
       });
-      const items = data.feed.map((item) => {
-        const post = item.post;
-        // The post record carries facets + the external link-card URL; the bot's
-        // facet helper extracts both (a docket shared as a card is seen too).
-        const record = post.record as RichtextRecord & { text?: string };
-        const reason = item.reason as
-          | { $type?: string; by?: { did?: string } }
-          | undefined;
-        return {
-          attributedDid: attributedDidOf(post.author.did, reason),
-          links: extractPostLinks(record),
-          text: record.text,
-          uri: post.uri,
-          indexedAt: post.indexedAt,
-        };
-      });
+      // mapListFeedItem (a pure, tested mapper) extracts the docket-attention
+      // signal and returns null for any postless/blocked/deleted entry, which we
+      // drop — so a single bad item can't throw and abort the whole feed read.
+      const items = data.feed
+        .map((item) => mapListFeedItem(item as RawListFeedItem))
+        .filter((p): p is WatchPost => p !== null);
       return { items };
     },
     async createRecord(collection, record): Promise<StrongRef> {

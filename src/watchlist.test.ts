@@ -13,9 +13,11 @@ import {
 import type { ProvisionConfig, ProvisionResult } from "./provisionCase.js";
 import {
   type ListFeedResult,
+  type RawListFeedItem,
   type WatchPost,
   type WatchlistDeps,
   attributedDidOf,
+  mapListFeedItem,
   tallyDocketAttention,
   watchlistSweepOnce,
 } from "./watchlist.js";
@@ -45,6 +47,70 @@ describe("attributedDidOf", () => {
     expect(attributedDidOf("did:plc:author", { $type: "something#else" })).toBe(
       "did:plc:author",
     );
+  });
+});
+
+describe("mapListFeedItem", () => {
+  const item = (over: Partial<RawListFeedItem> = {}): RawListFeedItem => ({
+    post: {
+      author: { did: "did:plc:author" },
+      record: {
+        text: "see the docket",
+        // Real posts carry the URL in a #link facet (Bluesky truncates it in the
+        // visible text); extractPostLinks reads facets/embed, not plain text.
+        facets: [
+          {
+            features: [
+              {
+                $type: "app.bsky.richtext.facet#link",
+                uri: DOCKET_URL(55),
+              },
+            ],
+          },
+        ],
+      },
+      uri: "at://did:plc:author/app.bsky.feed.post/abc",
+      indexedAt: "2026-06-20T00:00:00.000Z",
+    },
+    ...over,
+  });
+
+  it("maps a plain post: author attribution + extracted links + text", () => {
+    const got = mapListFeedItem(item());
+    expect(got).not.toBeNull();
+    expect(got?.attributedDid).toBe("did:plc:author");
+    expect(got?.links).toContain(DOCKET_URL(55));
+    expect(got?.text).toBe("see the docket");
+    expect(got?.uri).toBe("at://did:plc:author/app.bsky.feed.post/abc");
+  });
+
+  it("credits the reposter for a repost", () => {
+    const got = mapListFeedItem(
+      item({
+        reason: {
+          $type: "app.bsky.feed.defs#reasonRepost",
+          by: { did: "did:plc:booster" },
+        },
+      }),
+    );
+    expect(got?.attributedDid).toBe("did:plc:booster");
+  });
+
+  it("returns null for a postless item (deleted/blocked/hydration failure)", () => {
+    expect(mapListFeedItem({})).toBeNull();
+    expect(mapListFeedItem({ post: {} })).toBeNull();
+    expect(mapListFeedItem({ post: { author: {} } })).toBeNull();
+  });
+
+  it("tolerates a missing record (no links, no throw)", () => {
+    const got = mapListFeedItem({ post: { author: { did: "did:x" } } });
+    expect(got).toEqual({
+      attributedDid: "did:x",
+      links: [],
+      text: undefined,
+      uri: undefined,
+      indexedAt: undefined,
+    });
   });
 });
 
