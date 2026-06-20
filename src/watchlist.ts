@@ -84,6 +84,7 @@ export interface WatchlistConfig {
   threshold?: number;
   maxPerCycle?: number;
   intervalMs?: number;
+  provisionFloor?: number;
 }
 
 export interface WatchlistDeps {
@@ -206,6 +207,7 @@ export async function watchlistSweepOnce(
   // makes the floor explicit for an operator who sets the var to 0 expecting "off.")
   const threshold = Math.max(1, wl.threshold ?? WATCHLIST_THRESHOLD);
   const maxPerCycle = wl.maxPerCycle ?? WATCHLIST_MAX_PER_CYCLE;
+  const provisionFloor = wl.provisionFloor ?? WATCHLIST_PROVISION_FLOOR;
 
   // Cadence gate: re-read the feed only after a full interval (AppView politeness).
   const ledger0 = await loadLedger(cfg.ledgerPath);
@@ -247,13 +249,7 @@ export async function watchlistSweepOnce(
     // Budget floor gate: only spend when a live request's worth of budget remains
     // beyond this case. If no token qualifies, stop — the rest roll to a later
     // sweep (still trending). nowMs engages the predictive rolling-window gate.
-    const token = selectToken(
-      fresh,
-      cfg.tokens,
-      day,
-      WATCHLIST_PROVISION_FLOOR,
-      nowMs,
-    );
+    const token = selectToken(fresh, cfg.tokens, day, provisionFloor, nowMs);
     if (!token) break;
 
     attempts += 1;

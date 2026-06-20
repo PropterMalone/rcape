@@ -315,15 +315,32 @@ describe("watchlistSweepOnce", () => {
   it("does not provision when budget is below the floor", async () => {
     const path = join(dir, "ledger.json");
     const day = new Date(NOW).toISOString().slice(0, 10);
-    // Charge the day's quota down so < WATCHLIST_PROVISION_FLOOR (24) remains.
+    // Leave 10 calls; set the floor explicitly above it (config override, not the
+    // module constant) so the test states its own threshold rather than depending
+    // on the env-derived default.
     await writeLedger(path, (l) => chargeQuota(l, 125 - 10, day, "t"));
     const agent = feedAgent([post({ links: [DOCKET_URL(1234)] })]);
     const provision = vi.fn(async () => okResult);
-    const got = await watchlistSweepOnce(deps(path, agent, provision), {
-      now: () => NOW,
-    });
+    const got = await watchlistSweepOnce(
+      deps(path, agent, provision, { provisionFloor: 15 }),
+      { now: () => NOW },
+    );
     expect(got.provisioned).toBe(0);
     expect(provision).not.toHaveBeenCalled();
+  });
+
+  it("provisions when budget clears the floor", async () => {
+    const path = join(dir, "ledger.json");
+    const day = new Date(NOW).toISOString().slice(0, 10);
+    // Leave 20 calls; floor 15 → clears, so it provisions.
+    await writeLedger(path, (l) => chargeQuota(l, 125 - 20, day, "t"));
+    const agent = feedAgent([post({ links: [DOCKET_URL(1234)] })]);
+    const provision = vi.fn(async () => okResult);
+    const got = await watchlistSweepOnce(
+      deps(path, agent, provision, { provisionFloor: 15 }),
+      { now: () => NOW },
+    );
+    expect(got.provisioned).toBe(1);
   });
 
   it("treats threshold 0 as 1 (defensive clamp, no flood)", async () => {
