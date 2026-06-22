@@ -14,18 +14,15 @@ import {
 } from "./directory.js";
 import { linkFacets } from "./facet.js";
 import { type GistUpdateResult, updateGist } from "./gistClient.js";
-import { loadLedger } from "./ledger.js";
+import { loadLedger, mutateLedger, recordDirectoryListRkey } from "./ledger.js";
 import type { StrongRef } from "./queue.js";
+import { nextRkey } from "./repo.js";
 
 const POST = "app.bsky.feed.post";
 const PROFILE = "app.bsky.actor.profile";
 const LIST = "app.bsky.graph.list";
 const LISTITEM = "app.bsky.graph.listitem";
 const SHELF_GIST_FILE = "shelved-dockets.md";
-// Fixed rkey for the followable case-account list, so its AT-URI is deterministic
-// (no need to round-trip the create result) and it's created exactly once.
-// NEVER rename — this is baked into the stored graph.list AT-URI.
-export const LIST_RKEY = "shelf";
 
 // Structural deps so directorySync doesn't import BotDeps from bot.ts (which
 // imports this module). The live BotDeps (BotAgent + ProvisionConfig) satisfies it.
@@ -101,19 +98,21 @@ async function ensurePinnedPost(
 }
 
 // Ensure a followable `app.bsky.graph.list` of the case accounts exists and holds
-// exactly the completed-case DIDs. Idempotent: the list is created once (fixed
-// rkey → deterministic AT-URI); completed DIDs not yet listed get a new listitem,
-// AND listitems whose subject is no longer in the completed set (a superseded
-// account from a --force re-provision, or any stale DID) are deleted — so the
-// followable list never points at a dead/superseded account. Reads + writes are
-// PDS-local (the bot's own repo), so no CL quota is spent.
+// exactly the completed-case DIDs. Idempotent: the list lives at `listRkey` (a
+// persisted TID — app.bsky.graph.list is key:tid, so a fixed string is rejected
+// by the PDS), put once at that stable rkey; completed DIDs not yet listed get a
+// new listitem, AND listitems whose subject is no longer in the completed set (a
+// superseded account from a --force re-provision, or any stale DID) are deleted —
+// so the followable list never points at a dead/superseded account. Reads +
+// writes are PDS-local (the bot's own repo), so no CL quota is spent.
 async function ensureListMembership(
   agent: DirectoryAgent,
+  listRkey: string,
   completedDids: string[],
 ): Promise<void> {
-  const listUri = `at://${agent.did}/${LIST}/${LIST_RKEY}`;
-  if (!(await agent.getRecord(LIST, LIST_RKEY))) {
-    await agent.putRecord(LIST, LIST_RKEY, {
+  const listUri = `at://${agent.did}/${LIST}/${listRkey}`;
+  if (!(await agent.getRecord(LIST, listRkey))) {
+    await agent.putRecord(LIST, listRkey, {
       $type: LIST,
       purpose: "app.bsky.graph.defs#curatelist",
       name: "R.C. Ape — Shelved Dockets",
@@ -175,9 +174,20 @@ export async function regenerateDirectory(
     if (cfg.gistId) await ensurePinnedPost(agent, cfg.gistId);
 
     // 3. Followable native list of the case accounts (bot self-auth only — runs
-    // regardless of the gist config).
+    // regardless of the gist config). The list's rkey is a TID minted once and
+    // persisted in the ledger, so its AT-URI (which followers reference) is stable
+    // across restarts/regenerations. app.bsky.graph.list is key:tid — a fixed
+    // string rkey is rejected by the PDS.
+    let listRkey = ledger.directory?.listRkey;
+    if (!listRkey) {
+      listRkey = nextRkey();
+      await mutateLedger(cfg.ledgerPath, (l) =>
+        recordDirectoryListRkey(l, listRkey as string),
+      );
+    }
     await ensureListMembership(
       agent,
+      listRkey,
       cases.filter((c) => c.completed).map((c) => c.did),
     );
   } catch (e) {

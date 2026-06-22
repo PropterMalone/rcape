@@ -109,8 +109,9 @@ export interface BotAgent {
   // Generic record ops on the bot's OWN repo, for the public-directory feature:
   // the graph.list + listitem records and the combined pinned post. createRecord
   // lets the server assign the rkey; putRecord writes at a caller-chosen rkey
-  // (idempotent — used for the fixed "shelf" list and "shelfintro" post). Both
-  // return the {uri,cid} ref (putRecord's cid is needed to pin the post).
+  // (idempotent — used for the followable shelf list, whose rkey is a persisted
+  // TID since graph.list is key:tid). Both return the {uri,cid} ref (putRecord's
+  // cid is needed to pin the post).
   // getRecord/listRecords read the bot's own collections (PDS reads, no CL quota).
   createRecord(collection: string, record: unknown): Promise<StrongRef>;
   putRecord(

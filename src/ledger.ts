@@ -75,6 +75,12 @@ export interface Ledger {
   // Pre-shelve harvest cadence marker (same role as `watchlist` above, for the
   // private journalist-feed harvest). Absent ⇒ never harvested.
   harvest?: { sweptAt?: string };
+  // Public-directory state. `listRkey` is the TID rkey of the followable
+  // app.bsky.graph.list ("shelf") of case accounts. app.bsky.graph.list is
+  // key:tid in its lexicon, so the rkey MUST be a valid TID (not a fixed string);
+  // it's minted once and persisted here so the list's AT-URI stays stable across
+  // restarts/regenerations — followers reference that URI, so it must never change.
+  directory?: { listRkey?: string };
 }
 
 // CourtListener free tier: 125 requests/day per token.
@@ -121,6 +127,12 @@ export function recordWatchlistSwept(ledger: Ledger, iso: string): Ledger {
 // harvest cadence gate, mirroring recordWatchlistSwept.
 export function recordHarvestSwept(ledger: Ledger, iso: string): Ledger {
   return { ...ledger, harvest: { ...ledger.harvest, sweptAt: iso } };
+}
+
+// Persist the followable graph.list's TID rkey (pure merge), minted once on the
+// first directory regenerate and reused forever after — see Ledger.directory.
+export function recordDirectoryListRkey(ledger: Ledger, rkey: string): Ledger {
+  return { ...ledger, directory: { ...ledger.directory, listRkey: rkey } };
 }
 
 export function recordCase(
@@ -412,6 +424,8 @@ function normalize(parsed: Partial<Ledger>): Ledger {
   if (parsed.watchlist) out.watchlist = parsed.watchlist;
   // Carry the pre-shelve harvest cadence marker through load/mutate.
   if (parsed.harvest) out.harvest = parsed.harvest;
+  // Carry the public-directory state (the persisted graph.list TID rkey) through.
+  if (parsed.directory) out.directory = parsed.directory;
   return out;
 }
 

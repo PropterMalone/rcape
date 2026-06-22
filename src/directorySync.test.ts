@@ -2,13 +2,27 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  type DirectoryAgent,
-  LIST_RKEY,
-  regenerateDirectory,
-} from "./directorySync.js";
+import { type DirectoryAgent, regenerateDirectory } from "./directorySync.js";
 import type { GistUpdateResult } from "./gistClient.js";
-import { type CaseEntry, recordCase, saveLedger } from "./ledger.js";
+import {
+  type CaseEntry,
+  loadLedger,
+  recordCase,
+  saveLedger,
+} from "./ledger.js";
+
+const LIST = "app.bsky.graph.list";
+
+// app.bsky.graph.list is key:tid — the PDS rejects any non-TID rkey (the "shelf"
+// bug). A TID is 13 chars from the base32-sortable alphabet (234567abcdefghij...).
+const TID_RE = /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/;
+
+// The rkey of the single graph.list record an agent's record map holds.
+function listRkeyOf(records: Map<string, unknown>): string {
+  const key = [...records.keys()].find((k) => k.startsWith(`${LIST}/`));
+  if (!key) throw new Error("no graph.list record written");
+  return key.slice(`${LIST}/`.length);
+}
 
 // An in-memory DirectoryAgent: records keyed by `${collection}/${rkey}`.
 function fakeAgent() {
@@ -206,14 +220,17 @@ describe("regenerateDirectory", () => {
       ok: true,
     }));
 
-    // The list record exists at the fixed rkey, as a curatelist.
-    const list = records.get(`app.bsky.graph.list/${LIST_RKEY}`) as {
+    // The list record exists at a TID rkey (NOT "shelf"), as a curatelist.
+    const rkey = listRkeyOf(records);
+    expect(rkey).not.toBe("shelf");
+    expect(rkey).toMatch(TID_RE);
+    const list = records.get(`app.bsky.graph.list/${rkey}`) as {
       purpose: string;
       name: string;
     };
     expect(list.purpose).toBe("app.bsky.graph.defs#curatelist");
     expect(list.name).toContain("R.C. Ape");
-    // One listitem per completed case, each pointing at the deterministic list URI.
+    // One listitem per completed case, each pointing at the minted list URI.
     const items = [...records.entries()].filter(([k]) =>
       k.startsWith("app.bsky.graph.listitem/"),
     );
@@ -221,8 +238,33 @@ describe("regenerateDirectory", () => {
     const subjects = items.map(([, v]) => (v as { subject: string }).subject);
     expect(subjects.sort()).toEqual(["did:plc:case1", "did:plc:case2"]);
     expect((items[0]?.[1] as { list: string }).list).toBe(
-      `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
+      `at://did:plc:bot/app.bsky.graph.list/${rkey}`,
     );
+    // The minted rkey was persisted to the ledger for reuse.
+    expect((await loadLedger(ledgerPath)).directory?.listRkey).toBe(rkey);
+  });
+
+  it("reuses the persisted TID rkey across regenerates (stable AT-URI)", async () => {
+    const { agent, records } = fakeAgent();
+    const run = () =>
+      regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
+        ok: true,
+      }));
+    await run();
+    const rkey = listRkeyOf(records);
+    expect(rkey).toMatch(TID_RE);
+
+    // A fresh agent (simulating a restart) must reuse the persisted rkey, not mint
+    // a new one — otherwise the list's AT-URI changes and followers are orphaned.
+    const { agent: agent2, records: records2 } = fakeAgent();
+    await regenerateDirectory(
+      { agent: agent2, cfg: { ledgerPath } },
+      async () => ({
+        ok: true,
+      }),
+    );
+    expect(listRkeyOf(records2)).toBe(rkey);
+    expect((await loadLedger(ledgerPath)).directory?.listRkey).toBe(rkey);
   });
 
   it("does not duplicate listitems or recreate the list on a second run", async () => {
@@ -232,17 +274,19 @@ describe("regenerateDirectory", () => {
         ok: true,
       }));
     await run();
+    const rkey = listRkeyOf(records);
     const listCreatedAt = (
-      records.get(`app.bsky.graph.list/${LIST_RKEY}`) as { createdAt: string }
+      records.get(`app.bsky.graph.list/${rkey}`) as { createdAt: string }
     ).createdAt;
     await run();
     const items = [...records.keys()].filter((k) =>
       k.startsWith("app.bsky.graph.listitem/"),
     );
     expect(items).toHaveLength(1); // the single completed case, not duplicated
-    // The list record was not rewritten (same createdAt).
+    // The list record was not rewritten (same createdAt) and stays at one rkey.
+    expect(listRkeyOf(records)).toBe(rkey);
     expect(
-      (records.get(`app.bsky.graph.list/${LIST_RKEY}`) as { createdAt: string })
+      (records.get(`app.bsky.graph.list/${rkey}`) as { createdAt: string })
         .createdAt,
     ).toBe(listCreatedAt);
   });
@@ -271,21 +315,27 @@ describe("regenerateDirectory", () => {
 
   it("prunes a listitem whose subject is a superseded DID, keeps the current one", async () => {
     const { agent, records } = fakeAgent();
-    // Pre-seed the list + a stale listitem pointing at a superseded account (the
-    // old DID a --force re-provision archived) plus the still-current case1.
-    records.set(`app.bsky.graph.list/${LIST_RKEY}`, {
+    // Pre-seed a persisted TID rkey + the list at it + a stale listitem pointing
+    // at a superseded account (the old DID a --force re-provision archived) plus
+    // the still-current case1.
+    const seededRkey = "3kabcdefghijk";
+    await saveLedger(ledgerPath, {
+      ...(await loadLedger(ledgerPath)),
+      directory: { listRkey: seededRkey },
+    });
+    records.set(`app.bsky.graph.list/${seededRkey}`, {
       $type: "app.bsky.graph.list",
       createdAt: "2026-06-01T00:00:00.000Z",
     });
     records.set("app.bsky.graph.listitem/stale", {
       $type: "app.bsky.graph.listitem",
       subject: "did:plc:superseded",
-      list: `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
+      list: `at://did:plc:bot/app.bsky.graph.list/${seededRkey}`,
     });
     records.set("app.bsky.graph.listitem/keep", {
       $type: "app.bsky.graph.listitem",
       subject: "did:plc:case1",
-      list: `at://did:plc:bot/app.bsky.graph.list/${LIST_RKEY}`,
+      list: `at://did:plc:bot/app.bsky.graph.list/${seededRkey}`,
     });
     // The ledger's only completed case is case1 (seeded in beforeEach).
     await regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
