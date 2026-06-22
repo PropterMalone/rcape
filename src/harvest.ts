@@ -21,8 +21,11 @@
 // near-reset window is a TIMING heuristic, not free capacity — the HIGH selectToken
 // floor on the rolling window is the actual guard.
 
-import { announceProvision } from "./announce.js";
+import { type ProvisionedAnnouncement, announceProvision } from "./announce.js";
 import type { BotAgent } from "./botAgent.js";
+import { buildCaseCard } from "./card.js";
+import { truncate } from "./companionPost.js";
+import { mentionFacets } from "./facet.js";
 import {
   type Ledger,
   findCase,
@@ -47,7 +50,7 @@ import {
   type ProvisionResult,
   runProvision,
 } from "./provisionCase.js";
-import { findJob, loadQueue, nextDrainable } from "./queue.js";
+import { type StrongRef, findJob, loadQueue, nextDrainable } from "./queue.js";
 
 // How long an account feed rests before re-harvest (AppView politeness; the signal
 // moves on a news cycle, not by the minute).
@@ -81,7 +84,7 @@ export interface HarvestConfig {
 }
 
 export interface HarvestDeps {
-  agent: Pick<BotAgent, "getAuthorFeed" | "createRecord">;
+  agent: Pick<BotAgent, "getAuthorFeed" | "createRecord" | "reply">;
   cfg: ProvisionConfig;
   harvest?: HarvestConfig;
   // Set whenever harvest is armed; the functions no-op if absent.
@@ -89,6 +92,9 @@ export interface HarvestDeps {
   queuePath: string; // by-request queue, for cross-dedup + the idle gate
   cardThumb?: unknown;
   announce?: boolean;
+  // DIDs whose harvested cases get a one-time courtesy reply under the triggering
+  // post when shelved (Chris Geidner's carve-out). Empty/absent ⇒ no source reply.
+  notifyThreadDids?: string[];
   provision?: (id: number, cfg: ProvisionConfig) => Promise<ProvisionResult>;
 }
 
@@ -131,13 +137,26 @@ export async function harvestOnce(
   if (nowMs - sweptAtMs < interval) return { harvested: 0 };
 
   // Collect (docketId, source) from every account; one bad account never aborts.
-  const found: { docketId: number; source: string }[] = [];
+  // For a notify-thread source (Chris), also capture the triggering post + thread
+  // root so the drain can reply under it once the case shelves.
+  const notifyDids = new Set(deps.notifyThreadDids ?? []);
+  const found: {
+    docketId: number;
+    source: string;
+    notify?: { post: StrongRef; root: StrongRef };
+  }[] = [];
   for (const did of accounts) {
+    const isNotify = notifyDids.has(did);
     try {
       const feed = await deps.agent.getAuthorFeed(did, { limit: FEED_LIMIT });
       for (const p of feed.items) {
         const hit = parseDocketLink(p.text ?? "", p.links);
-        if (hit) found.push({ docketId: hit.docketId, source: did });
+        if (!hit) continue;
+        const notify =
+          isNotify && p.postRef && p.threadRoot
+            ? { post: p.postRef, root: p.threadRoot }
+            : undefined;
+        found.push({ docketId: hit.docketId, source: did, notify });
       }
     } catch (e) {
       console.error(
@@ -159,7 +178,7 @@ export async function harvestOnce(
   let pq = await loadPreshelveQueue(preshelveQueuePath);
   let harvested = 0;
   const seen = new Set<number>();
-  for (const { docketId, source } of found) {
+  for (const { docketId, source, notify } of found) {
     if (harvested >= HARVEST_MAX_ENQUEUE) break;
     if (seen.has(docketId)) continue;
     seen.add(docketId);
@@ -171,6 +190,7 @@ export async function harvestOnce(
       source,
       discoveredAt: nowIso,
       status: "pending",
+      ...(notify ? { notify } : {}),
     });
     harvested += 1;
   }
@@ -262,6 +282,13 @@ export async function preshelveDrainOnce(
         },
         result,
       );
+      // Notify-thread carve-out (Chris): one courtesy reply UNDER his triggering
+      // post. The sole bot post ever made into his thread — fired here, once. The
+      // job is already markPreshelveDone (durable) and never reprocessed, so this
+      // is at-most-once even across a restart. Best-effort: never fail the shelve.
+      if (job.notify) {
+        await notifyTriggerThread(deps, job.notify, result);
+      }
       provisioned += 1;
       console.log(
         `preshelve: auto-shelved docket ${docketId} (@${result.handle})`,
@@ -287,4 +314,44 @@ export async function preshelveDrainOnce(
     }
   }
   return { provisioned };
+}
+
+// The notify-thread carve-out's single in-thread post: a courtesy reply UNDER the
+// triggering post (parent = the post, root = its thread root) telling the source a
+// case they linked is now shelved + linking the case account. Best-effort — a post
+// failure is logged and swallowed so it never fails the shelve. This is the ONLY
+// place the harvest replies in-thread; every other bot post into such a thread is
+// re-routed to a new thread (bot.ts), so the source's notifications light up once.
+async function notifyTriggerThread(
+  deps: HarvestDeps,
+  notify: { post: StrongRef; root: StrongRef },
+  result: ProvisionedAnnouncement,
+): Promise<void> {
+  try {
+    const name = truncate(result.caseName?.trim() || "the docket", 180);
+    const text = `📚 Shelved: ${name}. Follow @${result.handle} — every filing on this docket now publishes to Bluesky.`;
+    const card = buildCaseCard(
+      {
+        handle: result.handle,
+        caseName: result.caseName,
+        docketNumber: result.docketNumber,
+        courtName: result.courtName,
+        filings: result.published,
+      },
+      deps.cardThumb,
+    );
+    await deps.agent.reply(
+      notify.post,
+      notify.root,
+      text,
+      mentionFacets(text, { [result.handle]: result.did }),
+      card,
+    );
+    console.log(`preshelve: notified trigger thread for @${result.handle}`);
+  } catch (e) {
+    console.error(
+      `preshelve: trigger-thread notify failed for @${result.handle}:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
 }

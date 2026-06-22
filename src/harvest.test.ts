@@ -68,16 +68,26 @@ function paths() {
   };
 }
 
-function feedAgent(items: { text?: string; links?: string[] }[]) {
+function feedAgent(
+  items: {
+    text?: string;
+    links?: string[];
+    postRef?: { uri: string; cid: string };
+    threadRoot?: { uri: string; cid: string };
+  }[],
+) {
   return {
     getAuthorFeed: vi.fn(async () => ({
       items: items.map((i) => ({
         attributedDid: "did:src",
         links: i.links ?? [],
         text: i.text,
+        ...(i.postRef ? { postRef: i.postRef } : {}),
+        ...(i.threadRoot ? { threadRoot: i.threadRoot } : {}),
       })),
     })),
     createRecord: vi.fn(async () => ({ uri: "at://x", cid: "c" })),
+    reply: vi.fn(async () => ({ uri: "at://reply", cid: "rc" })),
   };
 }
 
@@ -85,6 +95,7 @@ function deps(
   agent: ReturnType<typeof feedAgent>,
   provision: ReturnType<typeof vi.fn>,
   over: Partial<HarvestDeps["harvest"]> = {},
+  notifyThreadDids?: string[],
 ): HarvestDeps {
   const p = paths();
   return {
@@ -94,6 +105,7 @@ function deps(
     queuePath: p.queuePath,
     provision,
     harvest: { accounts: ["did:src"], ...over },
+    ...(notifyThreadDids ? { notifyThreadDids } : {}),
   };
 }
 
@@ -170,6 +182,32 @@ describe("harvestOnce", () => {
     const agent = feedAgent([{ links: [DOCKET_URL(7)] }]);
     const got = await harvestOnce(deps(agent, vi.fn()), { now: () => NOW_OUT });
     expect(got.harvested).toBe(0);
+  });
+
+  const POST_REF = { uri: "at://did:src/app.bsky.feed.post/abc", cid: "pc" };
+  const ROOT_REF = { uri: "at://did:src/app.bsky.feed.post/abc", cid: "pc" };
+
+  it("captures the notify target when the source is a notify-thread account", async () => {
+    await writeLedger();
+    const agent = feedAgent([
+      { links: [DOCKET_URL(8)], postRef: POST_REF, threadRoot: ROOT_REF },
+    ]);
+    await harvestOnce(deps(agent, vi.fn(), {}, ["did:src"]), {
+      now: () => NOW_OUT,
+    });
+    const pq = await loadPreshelveQueue(paths().preshelveQueuePath);
+    expect(pq.jobs[0]?.notify).toEqual({ post: POST_REF, root: ROOT_REF });
+  });
+
+  it("does NOT capture a notify target for non-notify sources", async () => {
+    await writeLedger();
+    const agent = feedAgent([
+      { links: [DOCKET_URL(9)], postRef: POST_REF, threadRoot: ROOT_REF },
+    ]);
+    // notifyThreadDids omitted → did:src is just an ordinary harvest source
+    await harvestOnce(deps(agent, vi.fn()), { now: () => NOW_OUT });
+    const pq = await loadPreshelveQueue(paths().preshelveQueuePath);
+    expect(pq.jobs[0]?.notify).toBeUndefined();
   });
 });
 
@@ -278,5 +316,37 @@ describe("preshelveDrainOnce", () => {
     expect(provision).not.toHaveBeenCalled();
     const pq = await loadPreshelveQueue(paths().preshelveQueuePath);
     expect(pq.jobs[0]?.status).toBe("done");
+  });
+
+  it("posts the one-time reply under the trigger post when the job has a notify target", async () => {
+    await writeLedger();
+    const post = { uri: "at://did:src/app.bsky.feed.post/x", cid: "pc" };
+    const root = post;
+    await seedPreshelve(pendingJob(1, { notify: { post, root } }));
+    const agent = feedAgent([]);
+    const provision = vi.fn(async () => okResult);
+    const got = await preshelveDrainOnce(deps(agent, provision), {
+      now: () => NOW_IN,
+    });
+    expect(got.provisioned).toBe(1);
+    // reply under the trigger post (parent=post, root=root), AND the standalone
+    // archive announce (createRecord) — both fire for a notify-source case.
+    expect(agent.reply).toHaveBeenCalledTimes(1);
+    const [parentArg, rootArg] = agent.reply.mock.calls[0] as unknown as [
+      { uri: string },
+      { uri: string },
+    ];
+    expect(parentArg).toEqual(post);
+    expect(rootArg).toEqual(root);
+    expect(agent.createRecord).toHaveBeenCalledTimes(1); // announce still fires
+  });
+
+  it("does NOT reply in-thread for a job with no notify target", async () => {
+    await writeLedger();
+    await seedPreshelve(pendingJob(1));
+    const agent = feedAgent([]);
+    const provision = vi.fn(async () => okResult);
+    await preshelveDrainOnce(deps(agent, provision), { now: () => NOW_IN });
+    expect(agent.reply).not.toHaveBeenCalled();
   });
 });

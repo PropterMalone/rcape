@@ -6,6 +6,7 @@
 // compete with or starve a real request. Persisted under data/ via atomicJson.
 
 import { loadJson, mutateJson, saveJson } from "./atomicJson.js";
+import type { StrongRef } from "./queue.js";
 
 export type PreshelveStatus = "pending" | "done" | "failed";
 
@@ -16,6 +17,11 @@ export interface PreshelveJob {
   source: string;
   discoveredAt: string; // ISO
   status: PreshelveStatus;
+  // Set ONLY when the source is a notify-thread account (Chris Geidner): the
+  // triggering post + its thread root, so the drain posts ONE courtesy reply under
+  // his post when the case shelves. Absent for every other source — they get no
+  // reply (the standing "do not mention them" rule).
+  notify?: { post: StrongRef; root: StrongRef };
 }
 
 export interface PreshelveQueue {

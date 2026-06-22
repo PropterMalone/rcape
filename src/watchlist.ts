@@ -30,6 +30,7 @@ import {
   type ProvisionResult,
   runProvision,
 } from "./provisionCase.js";
+import type { StrongRef } from "./queue.js";
 
 // How long between list-feed reads. The signal moves on a news cycle, not by the
 // minute, so a generous default keeps AppView reads modest under a 60s poll loop.
@@ -75,6 +76,12 @@ export interface WatchPost {
   text?: string;
   uri?: string;
   indexedAt?: string;
+  // The post's own strong ref ({uri,cid}) and its thread root, captured so the
+  // pre-shelve harvest can reply under a notify-account's (Chris's) post when the
+  // case shelves. threadRoot = the post's reply.root, or the post itself when
+  // top-level. Both undefined when the feed item lacks a cid.
+  postRef?: StrongRef;
+  threadRoot?: StrongRef;
 }
 export interface ListFeedResult {
   items: WatchPost[];
@@ -136,6 +143,7 @@ export interface RawListFeedItem {
     author?: { did?: string };
     record?: unknown;
     uri?: string;
+    cid?: string;
     indexedAt?: string;
   };
   reason?: { $type?: string; by?: { did?: string } };
@@ -152,13 +160,24 @@ export interface RawListFeedItem {
 export function mapListFeedItem(item: RawListFeedItem): WatchPost | null {
   const post = item.post;
   if (!post?.author?.did) return null;
-  const record = (post.record ?? {}) as RichtextRecord & { text?: string };
+  const record = (post.record ?? {}) as RichtextRecord & {
+    text?: string;
+    reply?: { root?: { uri: string; cid: string } };
+  };
+  // The post's own strong ref (needs both uri+cid); the thread root is the post's
+  // reply.root when it's a reply, else the post itself (a top-level post is its
+  // own root). Both stay undefined if the feed item omits the cid.
+  const postRef =
+    post.uri && post.cid ? { uri: post.uri, cid: post.cid } : undefined;
+  const threadRoot = record.reply?.root ?? postRef;
   return {
     attributedDid: attributedDidOf(post.author.did, item.reason),
     links: extractPostLinks(record),
     text: record.text,
     uri: post.uri,
     indexedAt: post.indexedAt,
+    ...(postRef ? { postRef } : {}),
+    ...(threadRoot ? { threadRoot } : {}),
   };
 }
 

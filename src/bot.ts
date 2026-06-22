@@ -13,6 +13,7 @@ import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
 import { buildCaseCard } from "./card.js";
 import type { CaseHint } from "./caseHint.js";
+import { BOT_SELF_LABEL } from "./companionPost.js";
 import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
 import { regenerateDirectory } from "./directorySync.js";
@@ -128,6 +129,61 @@ function backoffMs(retryCount: number): number {
   return RETRY_BACKOFF_MS[i] ?? 60_000;
 }
 
+const POST = "app.bsky.feed.post";
+
+// pattern: Functional Core
+// The author DID of a thread root from its AT-URI (at://<did>/<collection>/<rkey>).
+function rootAuthorDid(uri: string): string | undefined {
+  return uri.match(/^at:\/\/([^/]+)\//)?.[1];
+}
+
+// Whether a thread is rooted at a notify-thread account (Chris). Such threads get
+// AT MOST ONE bot post ever — the harvest's shelve notice; every other bot reply
+// that would land here is re-routed to a fresh top-level thread instead.
+function isNotifyRooted(
+  root: StrongRef,
+  notifyDids: string[] | undefined,
+): boolean {
+  if (!notifyDids?.length) return false;
+  const did = rootAuthorDid(root.uri);
+  return did !== undefined && notifyDids.includes(did);
+}
+
+// Reply to a mention/job normally — UNLESS its thread is notify-rooted, in which
+// case post the same content as a NEW top-level thread that @-mentions the engager
+// (so they're still notified) rather than threading into the protected thread.
+// Returns the posted record's ref (the new post, or the threaded reply).
+async function replyOrNewThread(
+  deps: BotDeps,
+  parent: StrongRef,
+  root: StrongRef,
+  engager: { handle: string; did: string },
+  text: string,
+  facets?: MentionFacet[],
+  embed?: unknown,
+): Promise<StrongRef> {
+  if (!isNotifyRooted(root, deps.notifyThreadDids)) {
+    return deps.agent.reply(parent, root, text, facets, embed);
+  }
+  // New thread: append "↪ @handle" so the engager is notified; their mention facet
+  // is computed over the full text, while the passed-in facets (which target the
+  // unchanged prefix) keep their byte offsets.
+  const handle = sanitizeHandle(engager.handle);
+  const newText = `${text}\n\n↪ @${handle}`;
+  const merged = [
+    ...(facets ?? []),
+    ...mentionFacets(newText, { [handle]: engager.did }),
+  ];
+  return deps.agent.createRecord(POST, {
+    $type: POST,
+    text: newText,
+    createdAt: new Date().toISOString(),
+    labels: BOT_SELF_LABEL,
+    ...(merged.length > 0 ? { facets: merged } : {}),
+    ...(embed ? { embed } : {}),
+  });
+}
+
 export type Action =
   | { kind: "ack-enqueue"; docketId: number }
   | { kind: "ack-queued"; docketId: number; ahead: number }
@@ -189,6 +245,10 @@ export interface BotDeps {
   // Pre-shelve harvest config (private journalist feeds → opportunistic backfill).
   // Optional: absent/empty accounts ⇒ off. Armed by RCAPE_HARVEST_ACCOUNTS.
   harvest?: HarvestConfig;
+  // DIDs whose threads get the carve-out: a one-time shelve reply on their post,
+  // and all other bot posts re-routed out of their threads (Chris Geidner). Armed
+  // by RCAPE_NOTIFY_THREAD_ACCOUNTS; absent ⇒ no source replies, no re-routing.
+  notifyThreadDids?: string[];
   // Path to the pre-shelve queue (separate from the by-request queuePath). Set in
   // production main(); optional so the many test deps need not supply it (the
   // harvest functions no-op without it).
@@ -291,23 +351,37 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     // reply to everyone. ("skip" already posts nothing.)
     const suppressNonActionable = m.source === "reply";
 
+    // The engager whose thread a notify-rooted reply would re-route around.
+    const engager = { handle: m.authorHandle, did: m.authorDid };
+
     if (action.kind === "reply-declined") {
       if (!suppressNonActionable) {
         const text = buildReply({ kind: "declined" });
-        await deps.agent.reply(parent, m.root, text, replyFacets(text, deps));
+        await replyOrNewThread(
+          deps,
+          parent,
+          m.root,
+          engager,
+          text,
+          replyFacets(text, deps),
+        );
       }
     } else if (action.kind === "reply-no-docket") {
       if (!suppressNonActionable) {
-        await deps.agent.reply(
+        await replyOrNewThread(
+          deps,
           parent,
           m.root,
+          engager,
           buildReply({ kind: "no-docket" }),
         );
       }
     } else if (action.kind === "reply-suggest") {
-      await deps.agent.reply(
+      await replyOrNewThread(
+        deps,
         parent,
         m.root,
+        engager,
         buildReply({
           kind: "suggest",
           caption: action.caption,
@@ -319,9 +393,11 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       // thread (the "thank you!" case) is the redundant inline link we don't want.
       if (!suppressNonActionable) {
         const text = buildReply({ kind: "exists", handle: action.handle });
-        await deps.agent.reply(
+        await replyOrNewThread(
+          deps,
           parent,
           m.root,
+          engager,
           text,
           action.did
             ? replyFacets(text, deps, {
@@ -360,7 +436,13 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
                 docketId: action.docketId,
                 ahead: action.ahead,
               });
-        const ackRef = await deps.agent.reply(parent, m.root, ackText);
+        const ackRef = await replyOrNewThread(
+          deps,
+          parent,
+          m.root,
+          engager,
+          ackText,
+        );
         // The ackRef only refines reply threading; a crash here at worst parents
         // the done-reply on the mention instead of the ack. Persist it best-effort.
         queue = setAck(queue, action.docketId, ackRef);
@@ -374,9 +456,11 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       if (res.reason === "requester-cap") {
         queue = markSeen(queue, m.uri);
         await persistQueue(deps.queuePath, queue);
-        await deps.agent.reply(
+        await replyOrNewThread(
+          deps,
           parent,
           m.root,
+          engager,
           buildReply({
             kind: "over-cap",
             inFlight: perRequesterQueued(queue, m.authorDid),
@@ -643,9 +727,11 @@ async function notifyAllDeferred(
         ? markThrottledNotified(q, job.docketId)
         : markDeferredNotified(q, job.docketId);
     await persistQueue(deps.queuePath, q);
-    await deps.agent.reply(
+    await replyOrNewThread(
+      deps,
       job.ackRef ?? job.mention,
       job.rootRef,
+      { handle: job.requesterHandle, did: job.requesterDid },
       buildReply({ kind, docketId: job.docketId }),
     );
   }
@@ -816,9 +902,11 @@ async function drain(
         },
         deps.cardThumb,
       );
-      await deps.agent.reply(
+      await replyOrNewThread(
+        deps,
         parent,
         job.rootRef,
+        { handle: job.requesterHandle, did: job.requesterDid },
         text,
         replyFacets(text, deps, { handle: result.handle, did: result.did }),
         card,
@@ -845,17 +933,21 @@ async function drain(
         },
         deps.cardThumb,
       );
-      await deps.agent.reply(
+      await replyOrNewThread(
+        deps,
         parent,
         job.rootRef,
+        { handle: job.requesterHandle, did: job.requesterDid },
         text,
         replyFacets(text, deps, { handle: result.handle, did: result.did }),
         card,
       );
     } else if (result.status === "not-found") {
-      await deps.agent.reply(
+      await replyOrNewThread(
+        deps,
         parent,
         job.rootRef,
+        { handle: job.requesterHandle, did: job.requesterDid },
         buildReply({ kind: "not-found" }),
       );
     } else if (result.status === "error" && willRetry) {
@@ -873,9 +965,11 @@ async function drain(
       console.error(
         `provision failed for docket ${job.docketId} after ${MAX_PROVISION_RETRIES} retries: ${result.status}`,
       );
-      await deps.agent.reply(
+      await replyOrNewThread(
+        deps,
         parent,
         job.rootRef,
+        { handle: job.requesterHandle, did: job.requesterDid },
         buildReply({ kind: "failed", docketId: job.docketId }),
       );
     }
@@ -975,6 +1069,13 @@ async function main(): Promise<void> {
   const announce = !/^(0|false|no)$/i.test(
     process.env.RCAPE_ANNOUNCE_PROVISIONS ?? "",
   );
+  // Notify-thread carve-out: DIDs (Chris Geidner) whose threads get the one-time
+  // shelve reply + the everything-else-routes-to-a-new-thread treatment. DIDs only
+  // (no handle resolution): these must match the thread-root author DID at runtime.
+  const notifyThreadDids = (process.env.RCAPE_NOTIFY_THREAD_ACCOUNTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith("did:"));
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
@@ -990,6 +1091,7 @@ async function main(): Promise<void> {
     ...(harvestAccounts.length
       ? { harvest: { accounts: harvestAccounts } }
       : {}),
+    ...(notifyThreadDids.length ? { notifyThreadDids } : {}),
     // Always wired (no Gemini needed): a fresh client per call (no throttle
     // interleaving with a concurrent provision client / no 13s pre-wait).
     searchByDocketNumber: async (caseNumber, courtId, token) => {
@@ -1046,6 +1148,11 @@ async function main(): Promise<void> {
     );
   }
   if (!announce) console.log("announce-on-provision DISABLED.");
+  if (notifyThreadDids.length) {
+    console.log(
+      `notify-thread carve-out armed for ${notifyThreadDids.length} account(s) (one-time shelve reply + thread-quarantine).`,
+    );
+  }
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);

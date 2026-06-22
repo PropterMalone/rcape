@@ -113,6 +113,8 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     embed?: unknown;
   }[] = [];
   const seenAts: string[] = [];
+  // Standalone posts created via createRecord (e.g. the new-thread re-routes).
+  const posts: { collection: string; record: unknown }[] = [];
   // In-memory own-repo records for the directory feature (no-ops in tests that
   // don't set a gist id, but typed so the mock satisfies BotAgent).
   const records = new Map<string, unknown>();
@@ -131,10 +133,10 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     getPostThread: async () => thread,
     getListFeed: async () => ({ items: [] }),
     getAuthorFeed: async () => ({ items: [] }),
-    createRecord: async (collection) => ({
-      uri: `at://did:bot/${collection}/auto`,
-      cid: "c",
-    }),
+    createRecord: async (collection, record) => {
+      posts.push({ collection, record });
+      return { uri: `at://did:bot/${collection}/auto`, cid: "c" };
+    },
     putRecord: async (collection, rkey, record) => {
       records.set(`${collection}/${rkey}`, record);
       return { uri: `at://did:bot/${collection}/${rkey}`, cid: "c" };
@@ -145,7 +147,7 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
       records.delete(`${collection}/${rkey}`);
     },
   };
-  return { agent, replies, seenAts };
+  return { agent, replies, seenAts, posts };
 }
 
 const provisionStub = async (): Promise<ProvisionResult> => ({
@@ -2020,6 +2022,101 @@ describe("prose inference (v1b)", () => {
       expect(r.queue.jobs[0]?.docketId).toBe(69777799);
     } finally {
       await r.cleanup();
+    }
+  });
+});
+
+describe("notify-thread carve-out (Geidner): re-route replies out of his threads", () => {
+  it("answers a mention in a notify-rooted thread as a NEW thread, not a reply", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      // Alice (allowlisted) @-mentions the bot inside a thread ROOTED at a Chris post.
+      const mention: MentionNotif = {
+        uri: "m1",
+        cid: "c1",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "@ape.rcape.org hello there",
+        root: { uri: "at://did:chris/app.bsky.feed.post/r1", cid: "rc1" },
+        source: "mention",
+      };
+      const { agent, replies, posts } = mockAgent([mention]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: {
+          tokens: ["t"],
+          domain: "rcape.org",
+          hashN: 0,
+          adminPassword: "",
+          cfToken: "",
+          zoneId: "",
+          ledgerPath,
+        } as ProvisionConfig,
+        queuePath,
+        notifyThreadDids: ["did:chris"],
+      };
+
+      await pollOnce(deps);
+
+      // No threaded reply into Chris's thread...
+      expect(replies).toHaveLength(0);
+      // ...instead a standalone post that @-mentions the engager.
+      const feedPosts = posts.filter(
+        (p) => p.collection === "app.bsky.feed.post",
+      );
+      expect(feedPosts).toHaveLength(1);
+      const rec = feedPosts[0]?.record as { text?: string; reply?: unknown };
+      expect(rec.reply).toBeUndefined(); // top-level, not in Chris's thread
+      expect(rec.text).toContain("@alice.test");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replies normally (in-thread) when the thread is NOT notify-rooted", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      await saveLedger(ledgerPath, emptyLedger());
+      const mention: MentionNotif = {
+        uri: "m1",
+        cid: "c1",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "@ape.rcape.org hello there",
+        root: { uri: "at://did:stranger/app.bsky.feed.post/r1", cid: "rc1" },
+        source: "mention",
+      };
+      const { agent, replies } = mockAgent([mention]);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: {
+          tokens: ["t"],
+          domain: "rcape.org",
+          hashN: 0,
+          adminPassword: "",
+          cfToken: "",
+          zoneId: "",
+          ledgerPath,
+        } as ProvisionConfig,
+        queuePath,
+        notifyThreadDids: ["did:chris"],
+      };
+
+      await pollOnce(deps);
+
+      // Ordinary thread → ordinary threaded reply (no-docket nudge).
+      expect(replies).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
