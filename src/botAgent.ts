@@ -98,6 +98,14 @@ export interface BotAgent {
     listUri: string,
     opts?: { limit?: number },
   ): Promise<ListFeedResult>;
+  // Read ONE account's author feed (recent posts/reposts), reduced to the same
+  // docket-attention signal as getListFeed. Used by the pre-shelve harvest, which
+  // reads a PRIVATE set of journalist accounts (never a public list). An AppView
+  // read (no CL quota).
+  getAuthorFeed(
+    did: string,
+    opts?: { limit?: number },
+  ): Promise<ListFeedResult>;
   // Generic record ops on the bot's OWN repo, for the public-directory feature:
   // the graph.list + listitem records and the combined pinned post. createRecord
   // lets the server assign the rkey; putRecord writes at a caller-chosen rkey
@@ -273,6 +281,17 @@ export async function createBotAgent(opts: {
       // mapListFeedItem (a pure, tested mapper) extracts the docket-attention
       // signal and returns null for any postless/blocked/deleted entry, which we
       // drop — so a single bad item can't throw and abort the whole feed read.
+      const items = data.feed
+        .map((item) => mapListFeedItem(item as RawListFeedItem))
+        .filter((p): p is WatchPost => p !== null);
+      return { items };
+    },
+    async getAuthorFeed(did, opts): Promise<ListFeedResult> {
+      const { data } = await agent.app.bsky.feed.getAuthorFeed({
+        actor: did,
+        limit: opts?.limit ?? 100,
+      });
+      // Same mapper + postless-item guard as getListFeed.
       const items = data.feed
         .map((item) => mapListFeedItem(item as RawListFeedItem))
         .filter((p): p is WatchPost => p !== null);

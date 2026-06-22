@@ -8,6 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
+import { announceProvision } from "./announce.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
 import { buildCaseCard } from "./card.js";
@@ -17,6 +18,11 @@ import type { ClSearchPage } from "./courtlistener.types.js";
 import { regenerateDirectory } from "./directorySync.js";
 import { type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
+import {
+  type HarvestConfig,
+  harvestOnce,
+  preshelveDrainOnce,
+} from "./harvest.js";
 import {
   type Ledger,
   chargeAndRecord,
@@ -180,6 +186,15 @@ export interface BotDeps {
   // Watchlist sweeper config (auto-shelve trending cases). Optional: absent ⇒ the
   // sweeper is off, the bot is by-request only. Armed by RCAPE_WATCHLIST_URI.
   watchlist?: WatchlistConfig;
+  // Pre-shelve harvest config (private journalist feeds → opportunistic backfill).
+  // Optional: absent/empty accounts ⇒ off. Armed by RCAPE_HARVEST_ACCOUNTS.
+  harvest?: HarvestConfig;
+  // Path to the pre-shelve queue (separate from the by-request queuePath). Set in
+  // production main(); optional so the many test deps need not supply it (the
+  // harvest functions no-op without it).
+  preshelveQueuePath?: string;
+  // Announce-on-provision switch (RCAPE_ANNOUNCE_PROVISIONS). Default on; false off.
+  announce?: boolean;
   provision?: (
     docketId: number,
     cfg: ProvisionConfig,
@@ -424,10 +439,33 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
     }
   }
 
+  // Pre-shelve harvest (private journalist feeds → opportunistic backfill). Two
+  // best-effort steps: harvest enqueues (AppView read, cadence-gated), then the
+  // drain shelves from the pre-shelve queue ONLY near the daily reset with a large
+  // quota reserve intact — so it never competes with a by-request user. Off unless
+  // RCAPE_HARVEST_ACCOUNTS is configured (harvestOnce/preshelveDrainOnce self-gate).
+  let preshelveProvisioned = 0;
+  if (deps.harvest?.accounts?.length) {
+    try {
+      await harvestOnce(deps);
+      preshelveProvisioned = (await preshelveDrainOnce(deps)).provisioned;
+    } catch (e) {
+      console.error(
+        "pre-shelve harvest failed:",
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
   // Regenerate the public directory ONCE per cycle when the shelf changed (a new
-  // provision, monitor-added filings, or a watchlist auto-shelve). regenerate-
-  // Directory is itself best-effort and never throws, so this can't abort the cycle.
-  if (provisioned || monitorUpdated > 0 || watchlistProvisioned > 0) {
+  // provision, monitor-added filings, a watchlist auto-shelve, or a pre-shelve).
+  // regenerateDirectory is itself best-effort and never throws.
+  if (
+    provisioned ||
+    monitorUpdated > 0 ||
+    watchlistProvisioned > 0 ||
+    preshelveProvisioned > 0
+  ) {
     await regenerateDirectory(deps);
   }
 }
@@ -785,6 +823,16 @@ async function drain(
         replyFacets(text, deps, { handle: result.handle, did: result.did }),
         card,
       );
+      // Also announce the new case from @ape's own feed (Feature B) — links the
+      // case, never the requester. Best-effort inside announceProvision.
+      await announceProvision(
+        {
+          agent: deps.agent,
+          cardThumb: deps.cardThumb,
+          announce: deps.announce,
+        },
+        result,
+      );
     } else if (result.status === "exists") {
       const text = buildReply({ kind: "exists", handle: result.handle });
       const card = buildCaseCard(
@@ -895,14 +943,53 @@ async function main(): Promise<void> {
   // by-request only. Tuning (threshold/interval/cap/floor) reads its own env in
   // watchlist.ts; here we just carry the list identifier that gates the feature.
   const watchlistUri = process.env.RCAPE_WATCHLIST_URI;
+  // Pre-shelve harvest: a PRIVATE, comma-separated set of journalist accounts
+  // (handles or DIDs) in RCAPE_HARVEST_ACCOUNTS, resolved to DIDs once at startup
+  // (AppView, no CL quota). Never published anywhere — the source list stays in
+  // .env. Empty/absent ⇒ the feature is off.
+  const harvestAccounts: string[] = [];
+  for (const raw of (process.env.RCAPE_HARVEST_ACCOUNTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    if (raw.startsWith("did:")) {
+      harvestAccounts.push(raw);
+      continue;
+    }
+    try {
+      harvestAccounts.push(
+        await resolveOwnerDid(
+          agent.graph as unknown as Parameters<typeof resolveOwnerDid>[0],
+          raw,
+        ),
+      );
+    } catch (e) {
+      console.warn(
+        `harvest: could not resolve account "${raw}" — skipping: ${
+          e instanceof Error ? e.message : e
+        }`,
+      );
+    }
+  }
+  // Announce-on-provision is on by default; RCAPE_ANNOUNCE_PROVISIONS=0/false opts out.
+  const announce = !/^(0|false|no)$/i.test(
+    process.env.RCAPE_ANNOUNCE_PROVISIONS ?? "",
+  );
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),
     cfg,
     queuePath: fileURLToPath(new URL("../data/queue.json", import.meta.url)),
+    preshelveQueuePath: fileURLToPath(
+      new URL("../data/preshelve-queue.json", import.meta.url),
+    ),
     ownerDid,
     cardThumb,
+    announce,
     ...(watchlistUri ? { watchlist: { listUri: watchlistUri } } : {}),
+    ...(harvestAccounts.length
+      ? { harvest: { accounts: harvestAccounts } }
+      : {}),
     // Always wired (no Gemini needed): a fresh client per call (no throttle
     // interleaving with a concurrent provision client / no 13s pre-wait).
     searchByDocketNumber: async (caseNumber, courtId, token) => {
@@ -953,6 +1040,12 @@ async function main(): Promise<void> {
       );
     }
   }
+  if (harvestAccounts.length) {
+    console.log(
+      `pre-shelve harvest armed (${harvestAccounts.length} private source account(s); drains near the daily reset with spare quota).`,
+    );
+  }
+  if (!announce) console.log("announce-on-provision DISABLED.");
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);

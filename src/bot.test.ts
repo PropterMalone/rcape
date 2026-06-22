@@ -130,6 +130,7 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     },
     getPostThread: async () => thread,
     getListFeed: async () => ({ items: [] }),
+    getAuthorFeed: async () => ({ items: [] }),
     createRecord: async (collection) => ({
       uri: `at://did:bot/${collection}/auto`,
       cid: "c",

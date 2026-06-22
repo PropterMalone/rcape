@@ -72,6 +72,9 @@ export interface Ledger {
   // feed read; the sweeper re-reads only after RCAPE_WATCHLIST_INTERVAL_MS, so a
   // 60s poll loop doesn't hammer the AppView's getListFeed. Absent ⇒ never swept.
   watchlist?: { sweptAt?: string };
+  // Pre-shelve harvest cadence marker (same role as `watchlist` above, for the
+  // private journalist-feed harvest). Absent ⇒ never harvested.
+  harvest?: { sweptAt?: string };
 }
 
 // CourtListener free tier: 125 requests/day per token.
@@ -112,6 +115,12 @@ export function findCase(
 // other ledger field). Drives the sweeper's cadence gate.
 export function recordWatchlistSwept(ledger: Ledger, iso: string): Ledger {
   return { ...ledger, watchlist: { ...ledger.watchlist, sweptAt: iso } };
+}
+
+// Stamp the pre-shelve harvest's last-feed-read time (pure merge). Drives the
+// harvest cadence gate, mirroring recordWatchlistSwept.
+export function recordHarvestSwept(ledger: Ledger, iso: string): Ledger {
+  return { ...ledger, harvest: { ...ledger.harvest, sweptAt: iso } };
 }
 
 export function recordCase(
@@ -401,6 +410,8 @@ function normalize(parsed: Partial<Ledger>): Ledger {
   if (parsed.calls) out.calls = parsed.calls;
   // Carry the watchlist sweeper's cadence marker through load/mutate.
   if (parsed.watchlist) out.watchlist = parsed.watchlist;
+  // Carry the pre-shelve harvest cadence marker through load/mutate.
+  if (parsed.harvest) out.harvest = parsed.harvest;
   return out;
 }
 
