@@ -203,24 +203,41 @@ export async function monitorOnce(
       value: prune(mapEntry(e, source, nowIso)),
     }));
 
-    const repo = await loginRepo({
-      host: cfg.host,
-      identifier: entry.did,
-      password: entry.password,
-    });
-    await repo.applyCreates(
-      liveEntries.map((e) => ({
-        collection: ENTRY_COLLECTION,
-        rkey: e.rkey,
-        value: e.value as unknown as Record<string, unknown>,
-      })),
-    );
-    const result: FireResult = await postEntries(
-      repo,
-      liveEntries,
-      caseName,
-      caseUrl,
-    );
+    // The PDS login + post block: an auth failure here can throw an error whose
+    // message echoes the case credentials. Mirror the drain's guard (bot.ts) — log
+    // ONLY docketId + the error type/status, never e.message, since journald retains
+    // it. An uncaught throw would also exit the whole loop and bubble to pollOnce,
+    // which logs e.message; the try/catch keeps the failure local and quiet.
+    let result: FireResult;
+    try {
+      const repo = await loginRepo({
+        host: cfg.host,
+        identifier: entry.did,
+        password: entry.password,
+      });
+      await repo.applyCreates(
+        liveEntries.map((e) => ({
+          collection: ENTRY_COLLECTION,
+          rkey: e.rkey,
+          value: e.value as unknown as Record<string, unknown>,
+        })),
+      );
+      result = await postEntries(repo, liveEntries, caseName, caseUrl);
+    } catch (e) {
+      // status (not message): an Atproto/XRPC error carries a `.status`; fall back
+      // to the error constructor name — both are credential-free.
+      const status =
+        (e as { status?: number })?.status ??
+        (e instanceof Error ? e.name : "unknown");
+      console.error(
+        `monitor: docket ${docketId} login/post failed (${status})`,
+      );
+      // Leave highWater untouched so the new filings retry next cadence; stamp
+      // checked so a persistent auth fault doesn't re-hammer every cadence.
+      await stampChecked(cfg.ledgerPath, docketId, nowIso);
+      checked += 1;
+      continue;
+    }
 
     // Advance high-water to the newest entry actually POSTED (failed ones stay
     // below the line so they're retried next cadence) and stamp the check time.

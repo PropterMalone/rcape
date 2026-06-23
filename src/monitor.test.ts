@@ -236,4 +236,44 @@ describe("monitorOnce", () => {
     const l = await loadLedger(ledgerPath);
     expect(l.cases["123"]?.lastCheckedAt).toBe(OLD); // untouched → retried later
   });
+
+  it("guards a login/post failure: stamps checked, never rethrows, never logs the password", async () => {
+    const ledgerPath = await seed();
+    // A PDS auth failure whose message echoes the case password — exactly what the
+    // drain path already refuses to log. The monitor must mirror that.
+    const loginRepo = vi.fn(async () => {
+      throw new Error("auth failed for did:case with password=pw");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await monitorOnce(
+        { cfg: cfg(ledgerPath) },
+        {
+          now: () => NOW,
+          makeClient: () =>
+            clientStub({
+              requestCount: 3,
+              fetchDocketEntriesSince: async () => [
+                entry("2025-03-02.001", 10),
+              ],
+            }),
+          loginRepo,
+        },
+      );
+      // Did NOT throw out of the loop; the case is counted checked (so a persistent
+      // auth fault doesn't re-hammer every cadence), but high-water is untouched so
+      // the new filing retries next cadence.
+      expect(r).toEqual({ checked: 1, updated: 0 });
+      const l = await loadLedger(ledgerPath);
+      expect(l.cases["123"]?.lastCheckedAt).toBe(NOW_ISO); // stamped
+      expect(l.cases["123"]?.highWater).toBe("2025-01-05.001"); // unchanged
+      // No console.error line carries the password (or the raw message).
+      const logged = errSpy.mock.calls.flat().join(" ");
+      expect(logged).toContain("123"); // docketId is logged
+      expect(logged).not.toContain("pw"); // credential is NOT
+      expect(logged).not.toContain("password=");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });

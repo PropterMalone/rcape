@@ -1798,6 +1798,40 @@ describe("prose inference (v1b)", () => {
     }
   });
 
+  it("suppresses the suggest AND skips the CL docket-number search on a REPLY (no contentless noise)", async () => {
+    // A bare PACER number arriving as a REPLY (not an @-mention) must not draw a
+    // "did you mean" suggest, and must not burn a searchByDocketNumber CL call —
+    // exactly the contentless-reply noise the suppression exists to prevent.
+    const inferCase = vi.fn(async () => hint);
+    const searchByDocketNumber = vi.fn(async () => ({
+      count: 16,
+      results: [
+        {
+          docket_id: 1,
+          caseName: "United States v. Sant",
+          court_id: "mnd",
+          docketNumber: "0:26-cr-00115",
+          dateFiled: "2026-06-14",
+        },
+      ],
+    }));
+    const r = await run({
+      mention: { ...caseNumberMention(), source: "reply" },
+      thread: null,
+      inferCase,
+      searchDockets: vi.fn(async () => null),
+      searchByDocketNumber,
+    });
+    try {
+      expect(searchByDocketNumber).not.toHaveBeenCalled(); // no wasted CL call
+      expect(inferCase).not.toHaveBeenCalled(); // no Gemini either
+      expect(r.replies).toHaveLength(0); // silence, not a suggest
+      expect(r.queue.jobs).toHaveLength(0);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
   it("CLARIFIES (never auto-provisions) on an exactly-one caption match, charging exactly 1 CL call for the search", async () => {
     const inferCase = vi.fn(async () => hint);
     const searchDockets = vi.fn(async () => oneMatch);

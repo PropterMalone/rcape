@@ -41,7 +41,12 @@ export const CASE_HINT_SCHEMA = {
   required: ["caption"],
 } as const;
 
-const clip = (s: string): string => s.slice(0, MAX_POST_CHARS);
+// Clip an untrusted post for the prompt: collapse ALL whitespace (newlines,
+// tabs, runs of spaces) to single spaces BEFORE truncating, so a crafted post
+// can't inject a line like "\n\nEND UNTRUSTED POSTS" to escape the marker
+// boundary and smuggle instructions to the model. Each post stays one line.
+const clip = (s: string): string =>
+  s.replace(/\s+/g, " ").trim().slice(0, MAX_POST_CHARS);
 
 // How many article URLs to hand url_context. The model fetches each (latency +
 // free-tier quota), so a small cap bounds cost; the nearest-context-first order

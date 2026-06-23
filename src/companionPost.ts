@@ -28,6 +28,15 @@ const MAX_GRAPHEMES = 300;
 
 const segmenter = new Intl.Segmenter();
 
+/** Grapheme-cluster count (NOT String.length, which is UTF-16 code units — the
+ * 📄/🗂 emoji and multibyte case names each span >1 code unit). Used to budget the
+ * description against the 300-grapheme post limit truncate() actually enforces. */
+export function graphemeLen(s: string): number {
+  let n = 0;
+  for (const _ of segmenter.segment(s)) n++;
+  return n;
+}
+
 /** Grapheme-aware truncation. Counts grapheme clusters, not code units. */
 export function truncate(s: string, n: number): string {
   const t = s.trim();
@@ -90,7 +99,7 @@ export function entryToPost(
   const tail = ` (${date})`;
   const body = truncate(
     entry.description,
-    MAX_GRAPHEMES - head.length - tail.length,
+    MAX_GRAPHEMES - graphemeLen(head) - graphemeLen(tail),
   );
   const text = truncate(`${head}${body}${tail}`, MAX_GRAPHEMES);
 

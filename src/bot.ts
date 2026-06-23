@@ -390,17 +390,23 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         );
       }
     } else if (action.kind === "reply-suggest") {
-      await replyOrNewThread(
-        deps,
-        parent,
-        m.root,
-        engager,
-        buildReply({
-          kind: "suggest",
-          caption: action.caption,
-          matches: action.matches,
-        }),
-      );
+      // Suppress on a reply, like its declined/no-docket/exists siblings: a
+      // "did you mean" is non-actionable noise in a thread the bot already replied
+      // in. (classifyMention already skips the CL-spending search on a reply, so
+      // this branch is normally unreachable on a reply — the gate makes it explicit.)
+      if (!suppressNonActionable) {
+        await replyOrNewThread(
+          deps,
+          parent,
+          m.root,
+          engager,
+          buildReply({
+            kind: "suggest",
+            caption: action.caption,
+            matches: action.matches,
+          }),
+        );
+      }
     } else if (action.kind === "reply-exists") {
       // Suppress on a reply: re-linking a case the bot already shelved in this
       // thread (the "thank you!" case) is the redundant inline link we don't want.
@@ -573,6 +579,15 @@ async function classifyMention(
   queue: Awaited<ReturnType<typeof loadQueue>>,
 ): Promise<Action> {
   let parsed = parseMention(m.text, m.links);
+  // A plain REPLY (not an explicit @-mention) gets silence when it yields nothing
+  // NEW (see pollOnce). The CL-spending inference paths below (docket-number search,
+  // Gemini caption search) would, on a reply, either emit a reply-suggest — the exact
+  // contentless noise the suppression exists to kill — or spend a CL call on text
+  // inference the reply lane deliberately doesn't offer. So gate them off on a reply:
+  // the free thread-LINK scan still runs and can resolve a real docket (→ a normal
+  // provision), and a reply with no resolvable LINK degrades to reply-no-docket,
+  // which pollOnce suppresses. Net: replies never burn a CL call to make noise.
+  const suppressNonActionable = m.source === "reply";
   // When the mention itself carries no docket, scan the thread it replies to for
   // an explicit docket LINK (a free getPostThread call — no LLM, no CL quota).
   // Best-effort: a failed fetch falls through to the no-docket reply, never
@@ -601,7 +616,12 @@ async function classifyMention(
   // multi-defendant case shares one number across dockets) degrades to a suggest —
   // we do NOT fall through to Gemini, whose caption guess can't beat an exact
   // number. Charge the search call before issuing it (crash-safe direction).
-  if ("kind" in parsed && allowed && deps.searchByDocketNumber) {
+  if (
+    "kind" in parsed &&
+    allowed &&
+    !suppressNonActionable &&
+    deps.searchByDocketNumber
+  ) {
     const ref = parseCaseRef(m.text);
     if (ref) {
       const token = selectToken(
@@ -639,7 +659,13 @@ async function classifyMention(
   // the model's own confidence (which can hallucinate a plausible caption).
   // Every failure (no hint, no quota, search error) degrades to the no-docket
   // reply: the requester is asked for a link, nothing is queued.
-  if ("kind" in parsed && allowed && deps.inferCase && deps.searchDockets) {
+  if (
+    "kind" in parsed &&
+    allowed &&
+    !suppressNonActionable &&
+    deps.inferCase &&
+    deps.searchDockets
+  ) {
     const hint = await deps
       .inferCase(m.text, collectThreadPosts(thread ?? undefined), m.links)
       .catch(() => null);

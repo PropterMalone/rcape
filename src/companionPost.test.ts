@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { backdatedCreatedAts, entryToPost, truncate } from "./companionPost.js";
+import {
+  backdatedCreatedAts,
+  entryToPost,
+  graphemeLen,
+  truncate,
+} from "./companionPost.js";
 import type { DocketEntryRecord } from "./map.js";
 
 describe("backdatedCreatedAts", () => {
@@ -98,7 +103,9 @@ describe("entryToPost", () => {
   it("truncates very long descriptions with an ellipsis", () => {
     const long = { ...entry, description: "X".repeat(1000) };
     const p = entryToPost(long, "Case", "https://view.example", "t");
-    expect(p.text.length).toBeLessThanOrEqual(300);
+    // The post limit is 300 GRAPHEMES, not code units — the 📄 head emoji is one
+    // grapheme but two UTF-16 code units, so .length can read 301 for a valid post.
+    expect(graphemeLen(p.text)).toBeLessThanOrEqual(300);
     expect(p.text).toContain("…");
   });
 
@@ -107,6 +114,38 @@ describe("entryToPost", () => {
     const p = entryToPost(noDocs, "Case", "https://view.example", "t");
     expect(p.embed?.external.uri).toBe("https://view.example");
     expect(p.embed?.external.title).toContain("Docket entry 1");
+  });
+
+  it("budgets the body by GRAPHEMES, not code units, so the emoji+multibyte head doesn't over-truncate", () => {
+    // head = "📄 {caseName} — Doc 1: ", tail = " (2025-03-24)". The 📄 is 2 UTF-16
+    // code units but 1 grapheme; the old `.length` budget over-subtracted, clipping
+    // a description that actually FITS the 300-grapheme post limit. Size a
+    // description to exactly fill the grapheme budget and assert no ellipsis.
+    const caseName = "Café Société v. Naïve Façade Ltd.";
+    const date = "2025-03-24";
+    const head = `📄 ${caseName} — Doc 1: `;
+    const tail = ` (${date})`;
+    const budget = 300 - graphemeLen(head) - graphemeLen(tail);
+    const description = "Z".repeat(budget); // exactly the available grapheme budget
+    const p = entryToPost(
+      { ...entry, description },
+      caseName,
+      "https://view.example",
+      "t",
+    );
+    // The whole post is within the limit and the body was NOT truncated.
+    expect(graphemeLen(p.text)).toBeLessThanOrEqual(300);
+    expect(p.text).not.toContain("…");
+    expect(p.text).toContain(description);
+  });
+});
+
+describe("graphemeLen", () => {
+  it("counts grapheme clusters, not UTF-16 code units", () => {
+    expect(graphemeLen("abc")).toBe(3);
+    expect("📄".length).toBe(2); // code units
+    expect(graphemeLen("📄")).toBe(1); // one grapheme
+    expect(graphemeLen("🇺🇸")).toBe(1); // flag is one cluster, 4 code units
   });
 });
 
