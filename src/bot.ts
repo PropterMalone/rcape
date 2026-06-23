@@ -570,6 +570,13 @@ async function classifyMention(
   // call (and Gemini), and must be reserved for allowlisted requesters (the link
   // paths above are free, so they may run for anyone).
   const allowed = await deps.allowlist.has(m.authorDid);
+  // One ledger read shared by the two budget gates below (docket-number search and
+  // Gemini inference). They never BOTH charge in a single call: a successful
+  // docket-number search either returns (suggest) or sets `parsed` to a docketId,
+  // which makes the Gemini path's `"kind" in parsed` guard false — so the shared
+  // snapshot stays accurate for whichever gate actually runs. The terminal dedup/
+  // quota read below is still taken fresh, so it reflects any charge made here.
+  const before = await loadLedger(deps.cfg.ledgerPath);
   // Still no docket → if the mention names a PACER case number (e.g.
   // "0:26-cr-00115"), search CL by docket number FIRST: it's a precise signal, so
   // it's cheaper (no Gemini) and more reliable than a guessed caption, and it runs
@@ -580,7 +587,6 @@ async function classifyMention(
   if ("kind" in parsed && allowed && deps.searchByDocketNumber) {
     const ref = parseCaseRef(m.text);
     if (ref) {
-      const before = await loadLedger(deps.cfg.ledgerPath);
       const token = selectToken(
         before,
         deps.cfg.tokens,
@@ -621,7 +627,6 @@ async function classifyMention(
       .inferCase(m.text, collectThreadPosts(thread ?? undefined), m.links)
       .catch(() => null);
     if (hint) {
-      const before = await loadLedger(deps.cfg.ledgerPath);
       const token = selectToken(
         before,
         deps.cfg.tokens,

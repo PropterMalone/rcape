@@ -44,7 +44,6 @@ import {
   markPreshelveFailed,
   mutatePreshelveQueue,
   pendingPreshelve,
-  savePreshelveQueue,
 } from "./preshelveQueue.js";
 import {
   type ProvisionConfig,
@@ -170,35 +169,38 @@ export async function harvestOnce(
   }
 
   // Stamp the cadence marker after reading (bounds feed reads to one per interval).
+  // The mutate touches only harvest.sweptAt, so ledger0's `cases` are still current
+  // for the dedup pass below — reuse it instead of a second loadLedger.
   await mutateLedger(deps.cfg.ledgerPath, (l) => recordHarvestSwept(l, nowIso));
 
   // Enqueue the new dockets: skip already-shelved (findCase), already in the
-  // by-request queue (findJob), or already in the pre-shelve queue. Single
-  // read-modify-write — the bot is the only writer of the pre-shelve queue, and
-  // harvest/drain run sequentially in pollOnce. Bound the batch.
-  const ledger = await loadLedger(deps.cfg.ledgerPath);
+  // by-request queue (findJob), or already in the pre-shelve queue. The append
+  // goes through the locked mutate (not a bare save) so it stays symmetric with the
+  // drain's writes — a future second writer can't clobber it. Bound the batch.
   const byRequest = await loadQueue(deps.queuePath);
-  let pq = await loadPreshelveQueue(preshelveQueuePath);
   let harvested = 0;
-  const seen = new Set<number>();
-  for (const { docketId, source, notify } of found) {
-    if (harvested >= HARVEST_MAX_ENQUEUE) break;
-    if (seen.has(docketId)) continue;
-    seen.add(docketId);
-    if (findCase(ledger, docketId)) continue;
-    if (findJob(byRequest, docketId)) continue;
-    if (findPreshelveJob(pq, docketId)) continue;
-    pq = enqueuePreshelve(pq, {
-      docketId,
-      source,
-      discoveredAt: nowIso,
-      status: "pending",
-      ...(notify ? { notify } : {}),
-    });
-    harvested += 1;
-  }
+  await mutatePreshelveQueue(preshelveQueuePath, (q0) => {
+    let pq = q0;
+    const seen = new Set<number>();
+    for (const { docketId, source, notify } of found) {
+      if (harvested >= HARVEST_MAX_ENQUEUE) break;
+      if (seen.has(docketId)) continue;
+      seen.add(docketId);
+      if (findCase(ledger0, docketId)) continue;
+      if (findJob(byRequest, docketId)) continue;
+      if (findPreshelveJob(pq, docketId)) continue;
+      pq = enqueuePreshelve(pq, {
+        docketId,
+        source,
+        discoveredAt: nowIso,
+        status: "pending",
+        ...(notify ? { notify } : {}),
+      });
+      harvested += 1;
+    }
+    return pq;
+  });
   if (harvested > 0) {
-    await savePreshelveQueue(preshelveQueuePath, pq);
     console.log(`harvest: enqueued ${harvested} pre-shelve case(s)`);
   }
   return { harvested };
