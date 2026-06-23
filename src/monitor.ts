@@ -16,6 +16,7 @@ import { type FireResult, postEntries } from "./fire.js";
 import {
   type CaseEntry,
   type Ledger,
+  MIN_QUOTA_FOR_CASE,
   chargeAndRecord,
   chargeQuota,
   loadLedger,
@@ -43,9 +44,10 @@ const MONITOR_MAX_PER_CYCLE = Number(
 // Per-case reservation for the monitor's own CL calls (fetchSince + maybe a
 // getDocket + slack), reconciled to the real count after.
 const MONITOR_RESERVED_CALLS = 5;
-// The monitor proceeds only if a token has budget BEYOND this provisioning floor
-// (mirrors bot.MIN_QUOTA_FOR_CASE) — monitoring must never starve a live request.
-const MONITOR_PROVISION_FLOOR = 12;
+// The monitor proceeds only if a token has budget BEYOND this provisioning floor.
+// It shares the by-request rung (MIN_QUOTA_FOR_CASE, the centralized ladder top in
+// ledger.ts) — monitoring must never starve a live request. See imports above.
+const MONITOR_PROVISION_FLOOR = MIN_QUOTA_FOR_CASE;
 
 export interface MonitorDeps {
   cfg: ProvisionConfig;

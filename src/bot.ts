@@ -26,6 +26,7 @@ import {
 } from "./harvest.js";
 import {
   type Ledger,
+  MIN_QUOTA_FOR_CASE,
   chargeAndRecord,
   findCase,
   loadLedger,
@@ -73,15 +74,10 @@ import {
 } from "./thread.js";
 import { type WatchlistConfig, watchlistSweepOnce } from "./watchlist.js";
 
-// Require this much free budget before STARTING a case, so one can't begin,
-// exhaust a token's shared budget partway, and strand itself half-provisioned.
-// MUST stay > RESERVED_CALLS_PER_CASE (provisionCase.ts = 10) so the gap absorbs
-// the race between this check and runProvision's reservation charge. Drain
-// re-checks before each job. Lowered 20→12 (2026-06-16) alongside the reservation:
-// a typical case is ~3 REST calls (entries paginate at 100/page; doc hashing is
-// off-quota), so the old 20 stranded ~a case worth of daily headroom; the
-// graceful throttle handling backstops a rare bigger docket.
-const MIN_QUOTA_FOR_CASE = 12;
+// MIN_QUOTA_FOR_CASE (the by-request start floor) now lives in ledger.ts as the
+// top rung of the centralized budget-priority ladder — see imports above. Require
+// this much free budget before STARTING a case, so one can't begin, exhaust a
+// token's shared budget partway, and strand itself half-provisioned.
 // CourtListener's retry-after is the AUTHORITY on when we may call again — our
 // own day-counter resets on the calendar day, but CL enforces a rolling window,
 // so the counter can read "budget left" while CL has us locked (the 2026-06-16

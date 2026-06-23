@@ -18,6 +18,7 @@
 
 import { type RichtextRecord, extractPostLinks } from "./facet.js";
 import {
+  WATCHLIST_FLOOR_DEFAULT,
   findCase,
   loadLedger,
   mutateLedger,
@@ -61,7 +62,7 @@ const WATCHLIST_MAX_PER_CYCLE = Number(
 // not pool-wide. If a pool is ever introduced, thread the gate's selected token into
 // runProvision so the spend honors the same floor.
 const WATCHLIST_PROVISION_FLOOR = Number(
-  process.env.RCAPE_WATCHLIST_PROVISION_FLOOR ?? 24,
+  process.env.RCAPE_WATCHLIST_PROVISION_FLOOR ?? WATCHLIST_FLOOR_DEFAULT,
 );
 // One getListFeed page (≤100 posts) is the rolling window. For a small curated
 // list that's days-to-weeks of lookback — plenty, and a single AppView call.

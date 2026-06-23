@@ -27,6 +27,7 @@ import { buildCaseCard } from "./card.js";
 import { truncate } from "./companionPost.js";
 import { mentionFacets } from "./facet.js";
 import {
+  HARVEST_FLOOR_DEFAULT,
   type Ledger,
   findCase,
   loadLedger,
@@ -65,7 +66,9 @@ const HARVEST_DRAIN_WINDOW_MS = Number(
 // selectToken `need` for a pre-shelve provision: a HIGH reserve so discretionary
 // work only ever uses comfortable surplus and never the budget a by-request user
 // (or overnight requests) will need. Far above MIN_QUOTA_FOR_CASE (12).
-const HARVEST_FLOOR = Number(process.env.RCAPE_HARVEST_FLOOR ?? 60);
+const HARVEST_FLOOR = Number(
+  process.env.RCAPE_HARVEST_FLOOR ?? HARVEST_FLOOR_DEFAULT,
+);
 // At most this many pre-shelve cases per drain cycle.
 const HARVEST_MAX_PER_DRAIN = Number(
   process.env.RCAPE_HARVEST_MAX_PER_DRAIN ?? 3,

@@ -86,6 +86,57 @@ export interface Ledger {
 // CourtListener free tier: 125 requests/day per token.
 export const DAILY_CAP = 125;
 
+// --- Budget priority ladder (single source) -------------------------------
+// All callers that gate a CL-spending action on remaining quota draw their
+// "require this much free budget before starting" floor from HERE, so the
+// fairness ordering can't silently invert when one literal is bumped. The
+// invariant — by-request <= monitor < watchlist < harvest — is asserted by a
+// test (ledger.test.ts) and re-asserted at module load (assertFloorOrdering).
+//
+// Each rung is a MIN_QUOTA_FOR_CASE-derived figure: a lower-priority sweep must
+// leave AT LEAST a by-request case's worth of headroom on top of its own
+// reservation, so it can never starve a human's on-demand provision.
+
+// Upfront reservation charged per case before fetching, reconciled to the real
+// count afterward (see provisionCase.ts for the why). The atom the floors build on.
+export const RESERVED_CALLS_PER_CASE = 10;
+
+// By-request start floor: a human @-mention. Must stay > RESERVED so the gap
+// absorbs the race between the start check and the reservation charge. The
+// watched-case monitor shares this exact rung (same priority as a human request,
+// so it neither outranks nor is outranked) — monitor.ts imports this directly
+// rather than a separate alias export, which would read as a duplicate.
+export const MIN_QUOTA_FOR_CASE = RESERVED_CALLS_PER_CASE + 2; // 12
+
+// Watchlist sweeper: lower priority than by-request/monitor — a token must have
+// headroom for THIS case's reservation PLUS a full by-request case in reserve, so
+// discretionary auto-shelving never consumes budget a human request needs. The
+// historical value is 24 (= reservation + a full live request worth of slack);
+// kept exactly while clamping the lower bound to the ladder-derived minimum.
+export const WATCHLIST_FLOOR_DEFAULT = Math.max(
+  RESERVED_CALLS_PER_CASE + MIN_QUOTA_FOR_CASE, // 22 ladder minimum
+  24,
+); // 24
+
+// Pre-shelve harvest: lowest priority — bulk overnight work that must yield to
+// every interactive path. Far above the others so a backlog never crowds them out.
+export const HARVEST_FLOOR_DEFAULT = 60;
+
+// Re-assert the fairness ladder at module load so a future edit that inverts it
+// fails loudly at startup, not silently in production. by-request <= monitor <
+// watchlist < harvest, where the monitor rung IS MIN_QUOTA_FOR_CASE (same rung).
+function assertFloorOrdering(): void {
+  const ok =
+    MIN_QUOTA_FOR_CASE < WATCHLIST_FLOOR_DEFAULT &&
+    WATCHLIST_FLOOR_DEFAULT < HARVEST_FLOOR_DEFAULT;
+  if (!ok) {
+    throw new Error(
+      `budget-floor ladder inverted: expected by-request/monitor < watchlist < harvest, got ${MIN_QUOTA_FOR_CASE} < ${WATCHLIST_FLOOR_DEFAULT} < ${HARVEST_FLOOR_DEFAULT}`,
+    );
+  }
+}
+assertFloorOrdering();
+
 // CL's per-token throttle windows for the docket endpoints. Only the 5/min cap is
 // verified live (2026-06-17: the 429 body literally reads "Rate limit exceeded:
 // 5/min"); the 50/hr and 125/24h figures are from CL docs / inferred, not yet

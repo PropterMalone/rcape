@@ -29,6 +29,7 @@ import { deriveHandle } from "./handle.js";
 import {
   type CaseEntry,
   type Ledger,
+  RESERVED_CALLS_PER_CASE,
   chargeAndRecord,
   chargeQuota,
   findCase,
@@ -66,18 +67,16 @@ export interface ProvisionConfig {
   gistId?: string;
 }
 
+// RESERVED_CALLS_PER_CASE (the per-case upfront reservation, =10) now lives in
+// ledger.ts as the atom the budget-priority ladder builds on — see imports above.
 // REST-counted calls per case = 1 (docket) + ceil(entries/100) + ceil(parties/100);
-// document hashing is off on storage.courtlistener.com and doesn't count. So a
+// document hashing is off on storage.courtlistener.com and doesn't count, so a
 // typical case is ~3 and even a large active docket rarely exceeds ~10. We charge
-// this upfront as a reservation BEFORE fetching, then reconcile to the actual
-// count — so a crash mid-fetch leaves the durable counter reflecting the spend
-// already made, not zero (a re-run would otherwise double-spend the shared cap).
-// Lowered 17→10 (2026-06-16): the old figure was a worst-case guard that stranded
-// daily headroom and blocked small cases late in the day. The reconcile still
-// makes the daily total exact, and the graceful 429/throttle handling now catches
-// any under-reservation by a rare >10-call docket cleanly (a deferred reply),
-// instead of the silent quota corruption the high reservation guarded against.
-const RESERVED_CALLS_PER_CASE = 10;
+// it upfront as a reservation BEFORE fetching, then reconcile to the actual count —
+// so a crash mid-fetch leaves the durable counter reflecting the spend already made,
+// not zero (a re-run would otherwise double-spend the shared cap). The reconcile
+// makes the daily total exact, and graceful 429/throttle handling catches any
+// under-reservation by a rare >10-call docket cleanly (a deferred reply).
 
 // Seams for testing without live CL / PDS / DNS / posting. All default to the
 // real implementations in production.

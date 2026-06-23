@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import {
   type CaseEntry,
   DAILY_CAP,
+  HARVEST_FLOOR_DEFAULT,
   type Ledger,
+  MIN_QUOTA_FOR_CASE,
+  RESERVED_CALLS_PER_CASE,
+  WATCHLIST_FLOOR_DEFAULT,
   chargeAndRecord,
   chargeQuota,
   emptyLedger,
@@ -469,5 +473,25 @@ describe("crash-safe persistence", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("budget-priority floors", () => {
+  it("preserves the fairness ladder by-request/monitor < watchlist < harvest", () => {
+    // The monitor rung IS MIN_QUOTA_FOR_CASE (monitor.ts imports it directly), so
+    // the by-request <= monitor leg is an identity; assert the remaining strict legs.
+    expect(MIN_QUOTA_FOR_CASE).toBeLessThan(WATCHLIST_FLOOR_DEFAULT);
+    expect(WATCHLIST_FLOOR_DEFAULT).toBeLessThan(HARVEST_FLOOR_DEFAULT);
+  });
+
+  it("keeps the historical floor values (no behavior change on centralizing)", () => {
+    expect(RESERVED_CALLS_PER_CASE).toBe(10);
+    expect(MIN_QUOTA_FOR_CASE).toBe(12); // by-request AND monitor rung
+    expect(WATCHLIST_FLOOR_DEFAULT).toBe(24);
+    expect(HARVEST_FLOOR_DEFAULT).toBe(60);
+  });
+
+  it("derives MIN_QUOTA_FOR_CASE as RESERVED plus a race buffer", () => {
+    expect(MIN_QUOTA_FOR_CASE).toBeGreaterThan(RESERVED_CALLS_PER_CASE);
   });
 });
