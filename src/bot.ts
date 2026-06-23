@@ -120,6 +120,23 @@ function validGistId(id: string | undefined): string | undefined {
   return undefined;
 }
 
+// pattern: Functional Core — parse RCAPE_NOTIFY_THREAD_ACCOUNTS into the carve-out
+// DID list. The carve-out matches the thread-root author DID, so only did:-form
+// entries count; handle-form entries are dropped. `warn` is true when the raw env
+// had entries but NONE were dids — an operator who configured handles would
+// otherwise see the carve-out silently disabled with no clue why.
+export function parseNotifyThreadDids(raw: string | undefined): {
+  dids: string[];
+  warn: boolean;
+} {
+  const entries = (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const dids = entries.filter((s) => s.startsWith("did:"));
+  return { dids, warn: entries.length > 0 && dids.length === 0 };
+}
+
 function backoffMs(retryCount: number): number {
   const i = Math.min(Math.max(0, retryCount - 1), RETRY_BACKOFF_MS.length - 1);
   return RETRY_BACKOFF_MS[i] ?? 60_000;
@@ -1073,10 +1090,13 @@ async function main(): Promise<void> {
   // Notify-thread carve-out: DIDs (Chris Geidner) whose threads get the one-time
   // shelve reply + the everything-else-routes-to-a-new-thread treatment. DIDs only
   // (no handle resolution): these must match the thread-root author DID at runtime.
-  const notifyThreadDids = (process.env.RCAPE_NOTIFY_THREAD_ACCOUNTS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.startsWith("did:"));
+  const { dids: notifyThreadDids, warn: notifyHandleWarn } =
+    parseNotifyThreadDids(process.env.RCAPE_NOTIFY_THREAD_ACCOUNTS);
+  if (notifyHandleWarn) {
+    console.warn(
+      "RCAPE_NOTIFY_THREAD_ACCOUNTS is set but no entry is a did: — the carve-out needs DIDs, not handles. Carve-out disabled.",
+    );
+  }
   const deps: BotDeps = {
     agent,
     allowlist: new AllowlistCache(agent.graph, ownerDid, allowlistTtlMs),

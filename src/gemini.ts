@@ -145,8 +145,12 @@ export function inferCaseFactory(
     const urls = collectReadableUrls(mentionLinks, entries);
     if (urls.length > 0) {
       const viaUrl = await client.generateJsonWithUrls(prompt, urls);
-      const hint = viaUrl === null ? null : validateCaseHint(viaUrl);
-      if (hint) return hint;
+      // Only fall through to the prose-only call when url_context FAILED to read
+      // (viaUrl === null: no output, paywall, error). A non-null-but-invalid
+      // answer means the model DID read the page and produced something that
+      // didn't validate — re-asking it the same prompt without the page can't do
+      // better, and burns a second Gemini call. So return null in that case.
+      if (viaUrl !== null) return validateCaseHint(viaUrl);
     }
     const raw = await client.generateJson(prompt, CASE_HINT_SCHEMA);
     return raw === null ? null : validateCaseHint(raw);

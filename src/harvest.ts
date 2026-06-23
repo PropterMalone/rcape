@@ -43,7 +43,7 @@ import {
   markPreshelveDone,
   markPreshelveFailed,
   mutatePreshelveQueue,
-  pendingPreshelve,
+  sortedPendingPreshelve,
 } from "./preshelveQueue.js";
 import {
   type ProvisionConfig,
@@ -236,13 +236,7 @@ export async function preshelveDrainOnce(
   // Snapshot the pending jobs (oldest first); iterate a fixed list so an error that
   // leaves a job pending doesn't re-loop on it this cycle.
   const q0 = await loadPreshelveQueue(preshelveQueuePath);
-  const pending = pendingPreshelve(q0).sort((a, b) =>
-    a.discoveredAt < b.discoveredAt
-      ? -1
-      : a.discoveredAt > b.discoveredAt
-        ? 1
-        : 0,
-  );
+  const pending = sortedPendingPreshelve(q0);
   if (pending.length === 0) return { provisioned: 0 };
 
   const provision = deps.provision ?? ((id, c) => runProvision(id, c));

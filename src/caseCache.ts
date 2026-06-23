@@ -76,6 +76,18 @@ export async function saveCachedCase(
   }
 }
 
+// Remove the complete cache ({id}.json) once a case is terminally provisioned: a
+// completed entry never reads its cache again (the dedupe short-circuits on
+// `completed`), so keeping it only grows data/case-cache unbounded as the archive
+// fills. Idempotent — a missing file doesn't throw. saveCachedCase writes a bare
+// file (no saveJson .bak/.tmp siblings), so only the one path needs removing.
+export async function clearCachedCase(
+  dir: string,
+  docketId: number,
+): Promise<void> {
+  await rm(cachePath(dir, docketId), { force: true }).catch(() => {});
+}
+
 // A PARTIAL fetch, accumulated across one or more rate-limit windows, so dribbled
 // capacity advances a big docket instead of restarting it every retry. Stores the
 // RAW CL payloads (not mapped records): mapping is a single terminal pure step

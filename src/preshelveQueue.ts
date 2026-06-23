@@ -54,17 +54,24 @@ export function pendingPreshelve(q: PreshelveQueue): PreshelveJob[] {
   return q.jobs.filter((j) => j.status === "pending");
 }
 
-// The oldest pending job (FIFO by discovery), or undefined when none pend.
-export function nextPendingPreshelve(
-  q: PreshelveQueue,
-): PreshelveJob | undefined {
+// The pending jobs in FIFO (oldest-discovered-first) order. The single source of
+// the drain ordering — the drain iterates this whole list, nextPendingPreshelve
+// takes its head — so the two can't drift in how they break ties.
+export function sortedPendingPreshelve(q: PreshelveQueue): PreshelveJob[] {
   return pendingPreshelve(q).sort((a, b) =>
     a.discoveredAt < b.discoveredAt
       ? -1
       : a.discoveredAt > b.discoveredAt
         ? 1
         : 0,
-  )[0];
+  );
+}
+
+// The oldest pending job (FIFO by discovery), or undefined when none pend.
+export function nextPendingPreshelve(
+  q: PreshelveQueue,
+): PreshelveJob | undefined {
+  return sortedPendingPreshelve(q)[0];
 }
 
 function setStatus(

@@ -7,6 +7,7 @@ import {
   CASE_CACHE_TTL_MS,
   type FetchCheckpoint,
   checkpointPath,
+  clearCachedCase,
   clearCheckpoint,
   loadCachedCase,
   loadCheckpoint,
@@ -59,6 +60,23 @@ describe("caseCache", () => {
   it("treats a corrupt cache file as a miss", async () => {
     await writeFile(join(dir, "123.json"), "{not json");
     expect(await loadCachedCase(dir, 123, Date.now())).toBeUndefined();
+  });
+
+  it("clearCachedCase removes the complete cache and is idempotent", async () => {
+    const now = "2026-06-22T20:00:00.000Z";
+    await saveCachedCase(dir, 123, sample, now);
+    // Present before clearing.
+    expect(
+      (await loadCachedCase(dir, 123, Date.parse(now) + 1000))?.docketRecord
+        .caseName,
+    ).toBe("Doe v. Roe");
+    await clearCachedCase(dir, 123);
+    // Gone after clearing → a subsequent load is a cold miss.
+    expect(
+      await loadCachedCase(dir, 123, Date.parse(now) + 1000),
+    ).toBeUndefined();
+    // Idempotent: clearing a missing file does not throw.
+    await expect(clearCachedCase(dir, 123)).resolves.toBeUndefined();
   });
 
   it("does not throw when the save directory is unwritable mid-path", async () => {

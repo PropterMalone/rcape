@@ -208,6 +208,33 @@ describe("inferCaseFactory", () => {
     expect(call).toBe(2);
   });
 
+  it("does NOT fall back to prose when url_context read the page but the hint fails validation", async () => {
+    // The model DID read the article (non-null answer) but produced an invalid
+    // hint (caption null) — re-asking the same prompt without the page can't do
+    // better, so it returns null after ONE call, not a wasted second Gemini call.
+    let call = 0;
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      call++;
+      const body = JSON.parse(init.body as string);
+      if (body.tools) {
+        // url_context returned parseable JSON, but it's an invalid hint.
+        return res(200, candidate('{"caption":null,"courtId":"cand"}'));
+      }
+      // A prose-only fallback would land here — it must NOT.
+      return res(200, candidate('{"caption":"Should v. NotHappen"}'));
+    });
+    const infer = inferCaseFactory(
+      new GeminiClient("k", "m", fetchImpl as unknown as typeof fetch),
+    );
+    const hint = await infer(
+      "pull this",
+      [{ text: "news", links: ["https://on.wsj.com/x"] }],
+      [],
+    );
+    expect(hint).toBeNull();
+    expect(call).toBe(1);
+  });
+
   it("skips url_context entirely when there are no readable links", async () => {
     const bodies: Record<string, unknown>[] = [];
     const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {

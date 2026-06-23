@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AllowlistCache, type GraphClient } from "./allowlist.js";
-import { type BotDeps, classify } from "./bot.js";
+import { type BotDeps, classify, parseNotifyThreadDids } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
 import {
   chargeQuota,
@@ -2118,5 +2118,33 @@ describe("notify-thread carve-out (Geidner): re-route replies out of his threads
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parseNotifyThreadDids", () => {
+  it("keeps only did:-form entries, trimming whitespace", () => {
+    const { dids, warn } = parseNotifyThreadDids(" did:plc:aaa , did:plc:bbb ");
+    expect(dids).toEqual(["did:plc:aaa", "did:plc:bbb"]);
+    expect(warn).toBe(false);
+  });
+
+  it("warns when entries exist but none are dids (handle-form config)", () => {
+    const { dids, warn } = parseNotifyThreadDids(
+      "@chrisgeidner.bsky.social, someone.bsky.social",
+    );
+    expect(dids).toEqual([]);
+    expect(warn).toBe(true);
+  });
+
+  it("does not warn on an empty or unset env", () => {
+    expect(parseNotifyThreadDids("")).toEqual({ dids: [], warn: false });
+    expect(parseNotifyThreadDids(undefined)).toEqual({ dids: [], warn: false });
+    expect(parseNotifyThreadDids("  ,  ")).toEqual({ dids: [], warn: false });
+  });
+
+  it("does not warn when at least one did is present alongside handles", () => {
+    const { dids, warn } = parseNotifyThreadDids("@handle, did:plc:ccc");
+    expect(dids).toEqual(["did:plc:ccc"]);
+    expect(warn).toBe(false);
   });
 });

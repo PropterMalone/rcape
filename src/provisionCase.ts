@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { fetchAndMapCase } from "./build.js";
 import {
   type FetchCheckpoint,
+  clearCachedCase,
   clearCheckpoint,
   loadCachedCase,
   loadCheckpoint,
@@ -548,6 +549,12 @@ export async function runProvision(
         filings: result.published,
       }),
     );
+
+    // Terminally complete → the cache will never be read again (the dedupe
+    // short-circuits on `completed`), so drop it to bound data/case-cache growth.
+    // Best-effort, AFTER the completed write is durable: a crash between leaves a
+    // harmless orphan the next run won't read. Sibling of clearCheckpoint above.
+    if (cfg.cacheDir) await clearCachedCase(cfg.cacheDir, docketId);
 
     return {
       status: "provisioned",
