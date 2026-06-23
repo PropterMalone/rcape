@@ -349,6 +349,44 @@ describe("regenerateDirectory", () => {
     expect(subjects).not.toContain("did:plc:superseded");
   });
 
+  it("leaves a listitem belonging to a DIFFERENT list untouched (prune is list-scoped)", async () => {
+    const { agent, records } = fakeAgent();
+    const seededRkey = "3kabcdefghijk";
+    await saveLedger(ledgerPath, {
+      ...(await loadLedger(ledgerPath)),
+      directory: { listRkey: seededRkey },
+    });
+    records.set(`app.bsky.graph.list/${seededRkey}`, {
+      $type: "app.bsky.graph.list",
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    // A listitem in a SECOND list (e.g. a moderation/block list the bot also
+    // keeps). Its subject is not a completed case, so a collection-wide prune
+    // would wrongly delete it.
+    records.set("app.bsky.graph.listitem/other", {
+      $type: "app.bsky.graph.listitem",
+      subject: "did:plc:otherlistmember",
+      list: "at://did:plc:bot/app.bsky.graph.list/3kotherlist0z",
+    });
+
+    await regenerateDirectory({ agent, cfg: { ledgerPath } }, async () => ({
+      ok: true,
+    }));
+
+    // Survives the prune (not deleted) and is not added to the shelf list — the
+    // shelf list gets a fresh listitem for case1, never reusing the other one.
+    expect(records.has("app.bsky.graph.listitem/other")).toBe(true);
+    const shelfSubjects = [...records.entries()]
+      .filter(
+        ([k, v]) =>
+          k.startsWith("app.bsky.graph.listitem/") &&
+          (v as { list?: string }).list ===
+            `at://did:plc:bot/app.bsky.graph.list/${seededRkey}`,
+      )
+      .map(([, v]) => (v as { subject: string }).subject);
+    expect(shelfSubjects).toEqual(["did:plc:case1"]);
+  });
+
   it("never throws when the gist call rejects (best-effort)", async () => {
     const { agent } = fakeAgent();
     const gistFn = vi.fn(async (): Promise<GistUpdateResult> => {

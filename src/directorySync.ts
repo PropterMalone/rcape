@@ -121,10 +121,14 @@ async function ensureListMembership(
       createdAt: new Date().toISOString(),
     });
   }
+  // listRecords is collection-scoped, not list-scoped — it returns EVERY listitem
+  // in the bot repo. Scope the prune to the shelf list so a second graph.list's
+  // members are never counted toward this list's set nor deleted by it.
   const existing = await agent.listRecords(LISTITEM);
   const wanted = new Set(completedDids);
   const existingSubjects = new Set<string>();
   for (const r of existing) {
+    if ((r.value as { list?: string }).list !== listUri) continue;
     const subject = (r.value as { subject?: string }).subject;
     if (typeof subject !== "string") continue;
     existingSubjects.add(subject);
