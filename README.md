@@ -30,10 +30,17 @@ Accounts are labeled with the official atproto `bot` self-label and are **unoffi
 
 Requirements: Node 22+, a self-hosted [atproto PDS](https://github.com/bluesky-social/pds), a (free) CourtListener API token, and a domain on a DNS provider you control.
 
-```sh
-npm install
-cp .env.example .env        # fill in CL token, PDS host + admin password, handle domain, Cloudflare token
-```
+### First-time setup (in order)
+
+1. **Stand up the PDS.** Run the official [`bluesky-social/pds`](https://github.com/bluesky-social/pds) and expose it on a public origin via a Cloudflare Tunnel (the PDS speaks plain HTTP on `localhost:2583`; `cloudflared` terminates TLS and routes `PDS_HOSTNAME` → that port). Copy `pds/pds.env.example` → `pds/pds.env` and fill the blank secrets. **`PDS_SERVICE_HANDLE_DOMAINS` is required** — set it to a leading-dot suffix you control DNS for (e.g. `.rcape.org`); without it every account mint fails with a 400. Then `requestCrawl` the PDS to the Bluesky relay so its accounts federate.
+2. **Install + configure the bot.**
+   ```sh
+   npm install
+   cp .env.example .env      # CL token, PDS host + admin password, handle domain, Cloudflare token
+   ```
+   Fill `.env` against the PDS you just stood up (the same handle-domain suffix, the PDS admin password, your CourtListener token).
+3. **Mint the Librarian account.** `npm run bot:init` creates the main `@ape.<your-domain>` account that receives @-mentions, points its handle DNS at the new DID, and sets its profile + pinned intro. Re-runnable: if `RCAPE_BOT_DID`/`RCAPE_BOT_PASSWORD` are already set it reuses them and just refreshes DNS + profile. Copy the printed DID/password back into `.env`.
+4. **Run the bot.** `npm run bot` starts the always-on mention listener + drain loop. (Provision individual cases by hand with the commands below.)
 
 **Provision a case end-to-end** (mint account -> DNS -> records -> backdated posts), deduped and quota-aware:
 
