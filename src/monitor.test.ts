@@ -93,6 +93,52 @@ function repoStub() {
   return { repo, created };
 }
 
+// A repo stub for the repair path: serves docketEntry records by rkey (with an
+// optional pre-set docPost), the docket "self" record, and records every post
+// createRecord + entry putRecord so a test can assert what got re-posted. To
+// simulate a post that fails AGAIN, `failOn` names rkeys whose createRecord throws;
+// `missing` names rkeys whose getRecord throws (record gone). postEntries runs the
+// entries in the order it's handed them (createRecord then putRecord(rkey)); we
+// recover the rkey for createRecord by peeking at the next entry value via a queue.
+function repairRepoStub(opts: {
+  entries: Record<string, { docPost?: { uri: string; cid: string } }>;
+  failOn?: Set<string>; // rkeys whose post createRecord throws (fails again)
+  missing?: Set<string>; // rkeys whose getRecord throws (record gone)
+  order: string[]; // the rkeys postEntries will be handed, in order
+}) {
+  const posted: string[] = []; // rkeys whose post createRecord succeeded
+  const puts: string[] = []; // rkeys re-putRecord'd with docPost
+  let i = 0; // index into `order`, advanced per createRecord call
+  const repo = {
+    getRecord: async (collection: string, rkey: string) => {
+      if (collection === "org.rcape.docket") {
+        return {
+          caseName: "Doe v. Roe",
+          source: { url: "https://www.courtlistener.com/docket/123/" },
+        };
+      }
+      if (opts.missing?.has(rkey)) throw new Error("RecordNotFound");
+      const e = opts.entries[rkey] ?? {};
+      return {
+        $type: "org.rcape.docketEntry",
+        dateFiled: "2025-02-01",
+        description: "filing",
+        ...e,
+      };
+    },
+    createRecord: async () => {
+      const rkey = opts.order[i++];
+      if (rkey && opts.failOn?.has(rkey)) throw new Error("PDS 502");
+      if (rkey) posted.push(rkey);
+      return { uri: "at://post", cid: "c" };
+    },
+    putRecord: async (_collection: string, rkey: string) => {
+      puts.push(rkey);
+    },
+  } as unknown as CaseRepo;
+  return { repo, posted, puts };
+}
+
 describe("selectDueCases", () => {
   it("returns completed cases due by interval, oldest-checked first, capped", () => {
     let l = emptyLedger();
@@ -235,6 +281,155 @@ describe("monitorOnce", () => {
     expect(r).toEqual({ checked: 0, updated: 0 });
     const l = await loadLedger(ledgerPath);
     expect(l.cases["123"]?.lastCheckedAt).toBe(OLD); // untouched → retried later
+  });
+
+  it("repairs backfillFailed companion posts from the repo and prunes the rkeys (quota-free)", async () => {
+    // Two failed rkeys, both genuinely lacking a docPost. No new filings (fetch
+    // returns []), so this is a pure late repair: it must run anyway.
+    const ledgerPath = await seed({
+      filings: 3,
+      backfillFailed: ["e1", "e2"],
+    });
+    const { repo, posted, puts } = repairRepoStub({
+      entries: { e1: {}, e2: {} },
+      order: ["e1", "e2"],
+    });
+    const loginRepo = vi.fn(async () => repo);
+    const fetchSince = vi.fn(async () => []); // nothing new
+    const r = await monitorOnce(
+      { cfg: cfg(ledgerPath) },
+      {
+        now: () => NOW,
+        makeClient: () =>
+          clientStub({ requestCount: 1, fetchDocketEntriesSince: fetchSince }),
+        loginRepo,
+      },
+    );
+    // The case is still "checked" (no new filings → updated 0), but repair happened.
+    expect(r).toEqual({ checked: 1, updated: 0 });
+    expect(loginRepo).toHaveBeenCalledOnce(); // logged in for repair
+    expect(posted).toEqual(["e1", "e2"]); // both re-posted
+    expect(puts).toEqual(["e1", "e2"]); // both re-linked with docPost
+    const l = await loadLedger(ledgerPath);
+    expect(l.cases["123"]?.backfillFailed).toBeUndefined(); // fully pruned
+    expect(l.cases["123"]?.filings).toBe(5); // 3 prior + 2 repaired
+    // No CL quota charged for the repair: only the monitor's own entry-fetch
+    // reservation/reconcile touches the rolling log (1 call here).
+    expect(l.calls?.[tokenId("t")]?.length ?? 0).toBe(1);
+  });
+
+  it("skips an entry that already has a docPost (no re-post) but still prunes it", async () => {
+    const ledgerPath = await seed({
+      filings: 2,
+      backfillFailed: ["stale", "real"],
+    });
+    const { repo, posted, puts } = repairRepoStub({
+      // `stale` was actually posted (its record carries a docPost); `real` wasn't.
+      entries: { stale: { docPost: { uri: "at://old", cid: "c0" } }, real: {} },
+      order: ["real"], // only `real` reaches postEntries
+    });
+    const loginRepo = vi.fn(async () => repo);
+    const r = await monitorOnce(
+      { cfg: cfg(ledgerPath) },
+      {
+        now: () => NOW,
+        makeClient: () =>
+          clientStub({
+            requestCount: 1,
+            fetchDocketEntriesSince: async () => [],
+          }),
+        loginRepo,
+      },
+    );
+    expect(r).toEqual({ checked: 1, updated: 0 });
+    expect(posted).toEqual(["real"]); // `stale` was NOT re-posted (no duplicate)
+    expect(puts).toEqual(["real"]);
+    const l = await loadLedger(ledgerPath);
+    expect(l.cases["123"]?.backfillFailed).toBeUndefined(); // both pruned
+    expect(l.cases["123"]?.filings).toBe(3); // 2 prior + 1 actually re-posted
+  });
+
+  it("keeps an rkey that fails AGAIN, prunes the one that succeeded", async () => {
+    const ledgerPath = await seed({
+      filings: 0,
+      backfillFailed: ["ok", "bad"],
+    });
+    const { repo, posted } = repairRepoStub({
+      entries: { ok: {}, bad: {} },
+      failOn: new Set(["bad"]), // bad's post throws again
+      order: ["ok", "bad"],
+    });
+    const loginRepo = vi.fn(async () => repo);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await monitorOnce(
+        { cfg: cfg(ledgerPath) },
+        {
+          now: () => NOW,
+          makeClient: () =>
+            clientStub({
+              requestCount: 1,
+              fetchDocketEntriesSince: async () => [],
+            }),
+          loginRepo,
+        },
+      );
+      expect(r).toEqual({ checked: 1, updated: 0 });
+      expect(posted).toEqual(["ok"]); // only ok posted
+      const l = await loadLedger(ledgerPath);
+      expect(l.cases["123"]?.backfillFailed).toEqual(["bad"]); // bad retained
+      expect(l.cases["123"]?.filings).toBe(1); // only ok counted
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("repair is best-effort: a thrown login error never aborts the pass or logs creds", async () => {
+    const ledgerPath = await seed({ backfillFailed: ["e1"] });
+    const loginRepo = vi.fn(async () => {
+      throw new Error("auth failed for did:case with password=pw");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await monitorOnce(
+        { cfg: cfg(ledgerPath) },
+        {
+          now: () => NOW,
+          makeClient: () =>
+            clientStub({
+              requestCount: 1,
+              fetchDocketEntriesSince: async () => [], // nothing new
+            }),
+          loginRepo,
+        },
+      );
+      // The pass completed (checked the case for new filings) despite repair failing.
+      expect(r).toEqual({ checked: 1, updated: 0 });
+      const l = await loadLedger(ledgerPath);
+      expect(l.cases["123"]?.backfillFailed).toEqual(["e1"]); // unchanged — retry later
+      const logged = errSpy.mock.calls.flat().join(" ");
+      expect(logged).toContain("123");
+      expect(logged).not.toContain("pw"); // credential NOT logged
+      expect(logged).not.toContain("password=");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("does not repair a case that isn't due (cadence-gated)", async () => {
+    const ledgerPath = await seed({
+      lastCheckedAt: NOW_ISO, // just checked → not due
+      backfillFailed: ["e1"],
+    });
+    const loginRepo = vi.fn();
+    const r = await monitorOnce(
+      { cfg: cfg(ledgerPath) },
+      { now: () => NOW, loginRepo: loginRepo as never },
+    );
+    expect(r).toEqual({ checked: 0, updated: 0 });
+    expect(loginRepo).not.toHaveBeenCalled(); // never logged in → no repair
+    const l = await loadLedger(ledgerPath);
+    expect(l.cases["123"]?.backfillFailed).toEqual(["e1"]); // untouched
   });
 
   it("guards a login/post failure: stamps checked, never rethrows, never logs the password", async () => {

@@ -12,7 +12,7 @@
 import { CaseRepo } from "./caseRepo.js";
 import { CourtListenerClient, ThrottledError } from "./courtlistener.js";
 import type { ClDocketEntry } from "./courtlistener.types.js";
-import { type FireResult, postEntries } from "./fire.js";
+import { type FireResult, type LiveEntry, postEntries } from "./fire.js";
 import {
   type CaseEntry,
   type Ledger,
@@ -24,11 +24,13 @@ import {
   recordCase,
   selectToken,
 } from "./ledger.js";
+import type { DocketEntryRecord } from "./map.js";
 import { makeSource, mapDocket, mapEntry } from "./map.js";
 import { type ProvisionConfig, postedHighWater } from "./provisionCase.js";
 import { nextRkey, prune } from "./repo.js";
 
 const ENTRY_COLLECTION = "org.rcape.docketEntry";
+const DOCKET_COLLECTION = "org.rcape.docket";
 
 // How long a completed case rests before it's re-checked. Conservative by default
 // (a federal docket rarely gains filings hourly) to bound the per-case CL spend as
@@ -128,6 +130,12 @@ export async function monitorOnce(
       chargeAndRecord(l, calls, day, tok, Date.now(), MONITOR_RESERVED_CALLS),
     );
   for (const { docketId, entry } of due) {
+    // Repair any backfillFailed companion posts FIRST and unconditionally — it's
+    // quota-free (PDS reads/writes only, no CL call) and best-effort, so it must
+    // run even when this case's CL budget is exhausted (the `break` below would
+    // otherwise skip it). Cadence-gated by selectDueCases like the rest of the pass.
+    await repairCase(cfg, docketId, entry, loginRepo);
+
     // Budget gate per case (re-read for live quota): only proceed with headroom
     // BEYOND a full provisioning case, so monitoring never starves a live request.
     const fresh = await loadLedger(cfg.ledgerPath);
@@ -274,6 +282,130 @@ export async function monitorOnce(
     if (result.published > 0) updated += 1;
   }
   return { checked, updated };
+}
+
+// Re-create the companion doc-posts for a case's backfillFailed rkeys — entries
+// whose RECORD exists (applyCreates wrote it before the post failed) but which
+// never got a backdated app.bsky.feed.post. QUOTA-FREE: the records already live
+// in the case's own repo, so repair reads them back (PDS reads) and re-runs
+// postEntries (PDS writes) — it makes NO CourtListener call and charges no quota.
+//
+// Duplicate guard: a docketEntry whose `docPost` strongRef is already set was in
+// fact posted — its rkey is just STALE in backfillFailed (a crash after the post
+// but before the ledger prune). Those are pruned WITHOUT re-posting, since
+// postEntries always creates a NEW post (it can't dedupe) and a duplicate filing
+// post is worse than a stale list entry. Only records that genuinely lack a
+// docPost are re-posted.
+//
+// Returns the rkeys that are now safe to drop from backfillFailed (re-posted OK
+// OR already had a docPost) so the caller prunes only those — an rkey that fails
+// AGAIN stays in the list for the next cadence. Best-effort by contract: a thrown
+// fault here is caught by the caller and never aborts the monitor pass.
+async function repairBackfill(
+  repo: CaseRepo,
+  rkeys: string[],
+): Promise<{ repaired: string[]; posted: number }> {
+  // Read each entry record back; correlate the failed rkey to its current value
+  // so we can both build the postEntries shape and inspect its docPost field.
+  const toPost: LiveEntry[] = [];
+  const alreadyPosted: string[] = [];
+  for (const rkey of rkeys) {
+    let value: DocketEntryRecord;
+    try {
+      value = (await repo.getRecord(
+        ENTRY_COLLECTION,
+        rkey,
+      )) as unknown as DocketEntryRecord;
+    } catch {
+      // The record is genuinely gone (e.g. a takedown removed the entry) — drop
+      // the rkey so it stops being a perpetual repair target. Nothing to post.
+      alreadyPosted.push(rkey);
+      continue;
+    }
+    if (value.docPost) {
+      // Stale in the list: the post exists. Prune without re-posting.
+      alreadyPosted.push(rkey);
+    } else {
+      toPost.push({ rkey, value });
+    }
+  }
+
+  if (toPost.length === 0) return { repaired: alreadyPosted, posted: 0 };
+
+  // Derive caseName / caseUrl from the case's own docket record — another PDS
+  // read, no CL call. Mirrors fireBackfill's loadDocket, kept local so repair
+  // never reaches for the network.
+  const docket = (await repo.getRecord(
+    DOCKET_COLLECTION,
+    "self",
+  )) as unknown as {
+    caseName?: string;
+    source?: { url?: string };
+  };
+  const caseName = docket.caseName ?? "this case";
+  const caseUrl = docket.source?.url ?? "https://www.courtlistener.com/";
+
+  const result = await postEntries(repo, toPost, caseName, caseUrl);
+  const failed = new Set(result.failed);
+  // Re-posted OK = the toPost rkeys minus those that failed again; combine with
+  // the stale-but-already-posted set. Only these are pruned from backfillFailed.
+  const reposted = toPost.map((e) => e.rkey).filter((r) => !failed.has(r));
+  return {
+    repaired: [...alreadyPosted, ...reposted],
+    posted: result.published,
+  };
+}
+
+// Best-effort backfill-repair for one due case: if its ledger entry carries
+// unrepaired rkeys, log into the repo, re-create the missing companion posts, and
+// prune the repaired rkeys (bumping the public filing count by the number actually
+// re-posted). Quota-free (PDS only). A repair failure is swallowed here so it can
+// never abort the monitor pass — the rkeys simply stay for the next cadence.
+async function repairCase(
+  cfg: ProvisionConfig,
+  docketId: number,
+  entry: CaseEntry,
+  loginRepo: NonNullable<MonitorSeams["loginRepo"]>,
+): Promise<void> {
+  const rkeys = entry.backfillFailed ?? [];
+  if (rkeys.length === 0) return;
+  try {
+    const repo = await loginRepo({
+      host: cfg.host,
+      identifier: entry.did,
+      password: entry.password,
+    });
+    const { repaired, posted } = await repairBackfill(repo, rkeys);
+    if (repaired.length === 0) return;
+    const drop = new Set(repaired);
+    await mutateLedger(cfg.ledgerPath, (l) => {
+      // Prune under the lock against the FRESH list (the drain/monitor may have
+      // appended new failures since we read) — keep only rkeys NOT repaired this
+      // pass, preserving UNION semantics with anything added concurrently. recordCase
+      // merges field-wise, so the password/superseded/highWater fields are untouched.
+      const priorCase = l.cases[String(docketId)];
+      const prior = priorCase?.backfillFailed ?? [];
+      const remaining = prior.filter((r) => !drop.has(r));
+      const filings = (priorCase?.filings ?? 0) + posted;
+      return recordCase(l, docketId, {
+        // Drop the key entirely when nothing's left, so the entry doesn't carry an
+        // empty array forever (matches how provision/monitor omit it when empty).
+        backfillFailed: remaining.length ? remaining : undefined,
+        filings,
+      } as CaseEntry);
+    });
+    console.log(
+      `monitor: docket ${docketId} (@${entry.handle}) repaired ${posted} backfill post(s), ${rkeys.length - drop.size} still failing`,
+    );
+  } catch (e) {
+    // status (not message): an Atproto/XRPC error may echo the case credentials.
+    const status =
+      (e as { status?: number })?.status ??
+      (e instanceof Error ? e.name : "unknown");
+    console.error(
+      `monitor: docket ${docketId} backfill repair failed (${status})`,
+    );
+  }
 }
 
 // Stamp only lastCheckedAt (a partial merge — recordCase preserves every other
