@@ -6,7 +6,9 @@ import { AllowlistCache, type GraphClient } from "./allowlist.js";
 import {
   type BotDeps,
   classify,
+  isAuthError,
   parseNotifyThreadDids,
+  runPollCycle,
   writeHeartbeat,
 } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
@@ -123,6 +125,8 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
   // In-memory own-repo records for the directory feature (no-ops in tests that
   // don't set a gist id, but typed so the mock satisfies BotAgent).
   const records = new Map<string, unknown>();
+  // Each reauth() call timestamped, so a test can assert re-login was triggered.
+  const reauths: number[] = [];
   const agent: BotAgent = {
     did: "did:bot",
     graph: allowGraph(["did:alice"]),
@@ -151,8 +155,11 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
     deleteRecord: async (collection, rkey) => {
       records.delete(`${collection}/${rkey}`);
     },
+    reauth: async () => {
+      reauths.push(Date.now());
+    },
   };
-  return { agent, replies, seenAts, posts };
+  return { agent, replies, seenAts, posts, reauths };
 }
 
 const provisionStub = async (): Promise<ProvisionResult> => ({
@@ -2199,6 +2206,134 @@ describe("writeHeartbeat", () => {
       expect(parsed.at).toBe(now);
       // The stamp round-trips to a valid Date (what the healthcheck ages off of).
       expect(Number.isNaN(Date.parse(parsed.at))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("isAuthError", () => {
+  it("classifies XRPCError auth codes (.error) as auth", () => {
+    expect(isAuthError({ error: "ExpiredToken" })).toBe(true);
+    expect(isAuthError({ error: "AuthenticationRequired" })).toBe(true);
+    expect(isAuthError({ error: "InvalidToken" })).toBe(true);
+  });
+
+  it("classifies a 401 status as auth", () => {
+    expect(isAuthError({ status: 401, error: "AuthMissing" })).toBe(true);
+  });
+
+  it("classifies the canonical auth messages as auth", () => {
+    expect(isAuthError({ message: "Token has expired" })).toBe(true);
+    expect(isAuthError({ message: "Authentication Required" })).toBe(true);
+  });
+
+  it("does NOT classify ordinary errors as auth", () => {
+    expect(isAuthError(new Error("fetch failed"))).toBe(false);
+    expect(isAuthError({ status: 500, error: "InternalServerError" })).toBe(
+      false,
+    );
+    expect(isAuthError({ status: 429, error: "RateLimitExceeded" })).toBe(
+      false,
+    );
+    expect(isAuthError(new Error("something broke"))).toBe(false);
+    // A non-auth code that merely mentions "token" in passing must not trip it.
+    expect(isAuthError({ error: "BadToken-ish", message: "token count" })).toBe(
+      false,
+    );
+    expect(isAuthError(null)).toBe(false);
+    expect(isAuthError("nope")).toBe(false);
+  });
+});
+
+describe("runPollCycle auth self-heal", () => {
+  // A minimal cfg/deps whose pollOnce throws because listMentions rejects. The
+  // throw is what runPollCycle's catch classifies; an auth error must drive a
+  // reauth(), an ordinary error must not.
+  async function cycleWith(
+    rejection: unknown,
+  ): Promise<{ reauths: number[]; heartbeatWritten: boolean }> {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-cycle-"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { agent, reauths } = mockAgent([]);
+      agent.listMentions = async () => {
+        throw rejection;
+      };
+      const cfg = {
+        tokens: ["t"],
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath: join(dir, "ledger.json"),
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg,
+        queuePath: join(dir, "queue.json"),
+      };
+      const heartbeatPath = join(dir, "heartbeat.json");
+      await runPollCycle(deps, heartbeatPath);
+      let heartbeatWritten = true;
+      try {
+        await readFile(heartbeatPath, "utf8");
+      } catch {
+        heartbeatWritten = false;
+      }
+      return { reauths, heartbeatWritten };
+    } finally {
+      spy.mockRestore();
+      logSpy.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("triggers reauth() when pollOnce throws an auth error", async () => {
+    const { reauths } = await cycleWith({ error: "ExpiredToken" });
+    expect(reauths).toHaveLength(1);
+  });
+
+  it("does NOT reauth on an ordinary (non-auth) error", async () => {
+    const { reauths } = await cycleWith(new Error("fetch failed"));
+    expect(reauths).toHaveLength(0);
+  });
+
+  it("does not write a heartbeat when the cycle fails", async () => {
+    const { heartbeatWritten } = await cycleWith({ error: "ExpiredToken" });
+    expect(heartbeatWritten).toBe(false);
+  });
+
+  it("writes a heartbeat and does not reauth on a successful cycle", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-cycle-ok-"));
+    try {
+      await saveLedger(join(dir, "ledger.json"), emptyLedger());
+      const { agent, reauths } = mockAgent([]); // no mentions → clean cycle
+      const cfg = {
+        tokens: ["t"],
+        domain: "rcape.org",
+        hashN: 0,
+        adminPassword: "",
+        cfToken: "",
+        zoneId: "",
+        ledgerPath: join(dir, "ledger.json"),
+      } as ProvisionConfig;
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg,
+        queuePath: join(dir, "queue.json"),
+      };
+      const heartbeatPath = join(dir, "heartbeat.json");
+      await runPollCycle(deps, heartbeatPath);
+      const parsed = JSON.parse(await readFile(heartbeatPath, "utf8")) as {
+        at: string;
+      };
+      expect(Number.isNaN(Date.parse(parsed.at))).toBe(false);
+      expect(reauths).toHaveLength(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

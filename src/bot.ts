@@ -154,6 +154,97 @@ export async function writeHeartbeat(
   await saveJson(path, { at: nowIso });
 }
 
+// pattern: Functional Core
+// True only for a HARD auth failure from an XRPC call — the class of error after
+// which every pollOnce throws forever (the loop catches-and-logs, the process
+// never crashes, systemd never restarts). atproto surfaces these as an XRPCError
+// whose `.error` is "ExpiredToken" / "AuthenticationRequired" / "InvalidToken",
+// and/or whose `.status` is 401, sometimes with a "Token has expired" /
+// "Authentication Required" message. Be CONSERVATIVE: only true auth signals trip
+// re-login. A 500, a network "fetch failed", or a generic Error must stay false —
+// re-logging on those would mask real faults and hammer the PDS with logins.
+export function isAuthError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { error?: unknown; message?: unknown; status?: unknown };
+  const error = typeof err.error === "string" ? err.error : "";
+  const message = typeof err.message === "string" ? err.message : "";
+  const status = typeof err.status === "number" ? err.status : undefined;
+  if (/^(ExpiredToken|AuthenticationRequired|InvalidToken)$/.test(error)) {
+    return true;
+  }
+  if (status === 401) return true;
+  // Message-only signals (some PDS/XRPC errors carry the auth reason in prose with
+  // a bare code). Anchored to the canonical phrasings so a 500 mentioning "token"
+  // in passing doesn't trip it.
+  return /Token has expired|Authentication Required/i.test(message);
+}
+
+// pattern: Functional Core
+// A credential-SAFE one-line summary of an auth error for logging: name/code +
+// status ONLY, never the message. A PDS/XRPC auth error can echo the submitted
+// identifier or password in its message, and journald retains logs indefinitely —
+// so on the re-auth path we log this instead of `e.message`.
+export function authErrorSummary(e: unknown): string {
+  if (typeof e !== "object" || e === null) return typeof e;
+  const err = e as { name?: unknown; error?: unknown; status?: unknown };
+  const parts: string[] = [];
+  if (typeof err.name === "string" && err.name) parts.push(err.name);
+  if (typeof err.error === "string" && err.error)
+    parts.push(`error=${err.error}`);
+  if (typeof err.status === "number") parts.push(`status=${err.status}`);
+  return parts.length > 0 ? parts.join(" ") : "auth error";
+}
+
+// pattern: Imperative Shell
+// Run one poll cycle with the main loop's error handling, extracted from main()'s
+// `for(;;)` so the success→heartbeat and auth-error→reauth decisions are unit-
+// testable (main's loop itself is not). Mirrors the loop body exactly:
+//   - on success: stamp the heartbeat (best-effort);
+//   - on a HARD auth error: re-login so a recoverable lapse self-heals;
+//   - on any other error: log and carry on (the loop retries next interval).
+// Never throws — every error is caught here, matching the loop's best-effort
+// contract (a thrown cycle must not kill the always-on process).
+export async function runPollCycle(
+  deps: BotDeps,
+  heartbeatPath: string,
+): Promise<void> {
+  try {
+    await pollOnce(deps);
+    // Heartbeat ONLY on the success path: a caught error below leaves the prior
+    // (now-stale) stamp, which is exactly the silent-stall signal the external
+    // healthcheck alerts on. Best-effort — never let a heartbeat write break the
+    // loop.
+    await writeHeartbeat(heartbeatPath, new Date().toISOString()).catch((e) =>
+      console.error(
+        "heartbeat write failed:",
+        e instanceof Error ? e.message : e,
+      ),
+    );
+  } catch (e) {
+    // A HARD auth failure (refresh-token expiry, app-password rotation, PDS
+    // restart) makes every subsequent pollOnce throw forever — caught here, the
+    // process never crashes, so systemd never restarts. Detect it and re-login so
+    // a recoverable lapse self-heals instead of spinning silently. Log only a
+    // credential-SAFE summary on this path (the message can echo creds; journald
+    // keeps logs forever); the reauth itself is best-effort and logged.
+    if (isAuthError(e)) {
+      console.error(
+        `poll cycle failed (auth): ${authErrorSummary(e)} — re-authenticating`,
+      );
+      try {
+        await deps.agent.reauth();
+        console.log("re-authentication succeeded.");
+      } catch (reauthErr) {
+        console.error(
+          `re-authentication failed: ${authErrorSummary(reauthErr)}`,
+        );
+      }
+    } else {
+      console.error("poll cycle failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 function backoffMs(retryCount: number): number {
   const i = Math.min(Math.max(0, retryCount - 1), RETRY_BACKOFF_MS.length - 1);
   return RETRY_BACKOFF_MS[i] ?? 60_000;
@@ -1226,21 +1317,7 @@ async function main(): Promise<void> {
   );
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);
   for (;;) {
-    try {
-      await pollOnce(deps);
-      // Heartbeat ONLY on the success path: a caught error below leaves the prior
-      // (now-stale) stamp, which is exactly the silent-stall signal the external
-      // healthcheck alerts on. Best-effort — never let a heartbeat write break the
-      // loop.
-      await writeHeartbeat(heartbeatPath, new Date().toISOString()).catch((e) =>
-        console.error(
-          "heartbeat write failed:",
-          e instanceof Error ? e.message : e,
-        ),
-      );
-    } catch (e) {
-      console.error("poll cycle failed:", e instanceof Error ? e.message : e);
-    }
+    await runPollCycle(deps, heartbeatPath);
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

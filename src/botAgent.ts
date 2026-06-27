@@ -124,6 +124,15 @@ export interface BotAgent {
   // Delete a record from the bot's OWN repo (e.g. a graph.list listitem pointing
   // at a superseded case account). Idempotent at the PDS for an absent record.
   deleteRecord(collection: string, rkey: string): Promise<void>;
+  // Re-establish the session by logging in again with the original credentials.
+  // EMPIRICAL CONTEXT: the AtpAgent session has survived 2+ days of uptime and is
+  // still posting, so @atproto/api's built-in access-token auto-refresh works. The
+  // gap is a HARD auth failure — refresh-token expiry (single-use, can drift out
+  // of sync), a revoked/rotated app-password, or a PDS restart invalidating the
+  // session — after which every call throws an auth error forever; the bot loop
+  // catches-and-logs it so the process never crashes and systemd never restarts.
+  // reauth() lets the main loop self-heal a recoverable lapse by re-running login.
+  reauth(): Promise<void>;
 }
 
 // pattern: Functional Core
@@ -337,6 +346,17 @@ export async function createBotAgent(opts: {
         repo: did,
         collection,
         rkey,
+      });
+    },
+    async reauth(): Promise<void> {
+      // Re-run login with the SAME credentials captured in this closure (opts), so
+      // a hard auth lapse (refresh-token expiry, app-password rotation, PDS
+      // restart) self-heals on the next cycle. login() replaces the agent's
+      // internal session in place, so the existing `did`/method bindings keep
+      // working against the new tokens.
+      await agent.login({
+        identifier: opts.identifier,
+        password: opts.password,
       });
     },
     async listRecords(collection): Promise<{ uri: string; value: unknown }[]> {
