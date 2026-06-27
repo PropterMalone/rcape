@@ -65,6 +65,10 @@ npm run takedown -- --entry <rkey> --reason "<basis>"   # remove a filing + its 
 
 `npm run validate` runs Biome, TypeScript, Vitest, and Knip.
 
+### Liveness monitoring
+
+The poll loop catches-and-logs transient errors and never crashes, so a hard fault (e.g. a session lapse) can leave the process alive but doing nothing — `Restart=always` won't fire. As a dead-man's-switch, the bot stamps `data/heartbeat.json` after each successful poll cycle, and `deploy/healthcheck.sh` ages that stamp and posts to `https://ntfy.sh/malone-monitoring` when it goes stale (default 600s, override `RCAPE_HEARTBEAT_STALE_S`) or missing. Wire it to cron: `*/5 * * * * /opt/rcape/deploy/healthcheck.sh`.
+
 ## Status
 
 The **R.C. Ape** by-request bot is shipped: mention [@ape.rcape.org](https://bsky.app/profile/ape.rcape.org) with a CourtListener docket (a link or its id) and it provisions a per-case repo, replying when the case is shelved. Requests are admitted from accounts [@proptermalone](https://bsky.app/profile/proptermalone.bsky.social) follows or who follow them, and drained under the shared CourtListener daily budget.

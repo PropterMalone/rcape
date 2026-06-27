@@ -9,6 +9,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { announceProvision } from "./announce.js";
+import { saveJson } from "./atomicJson.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
 import { buildCaseCard } from "./card.js";
@@ -135,6 +136,22 @@ export function parseNotifyThreadDids(raw: string | undefined): {
     .filter((s) => s.length > 0);
   const dids = entries.filter((s) => s.startsWith("did:"));
   return { dids, warn: entries.length > 0 && dids.length === 0 };
+}
+
+// pattern: Imperative Shell
+// Liveness heartbeat: stamp `data/heartbeat.json` with the current time after each
+// SUCCESSFUL poll cycle so an external check (deploy/healthcheck.sh) can tell the
+// always-on bot has gone silent. The failure mode this guards is a poll that
+// throws forever and is caught-and-logged by the main loop — the process never
+// crashes, so systemd Restart=always never fires. A stale/missing heartbeat is the
+// only outside-observable signal of that stall. Best-effort at the call site: a
+// write failure here must not break the loop (a heartbeat we can't write is no
+// worse than the silent stall it watches for).
+export async function writeHeartbeat(
+  path: string,
+  nowIso: string,
+): Promise<void> {
+  await saveJson(path, { at: nowIso });
 }
 
 function backoffMs(retryCount: number): number {
@@ -1202,10 +1219,25 @@ async function main(): Promise<void> {
   }
 
   const intervalMs = Number(process.env.RCAPE_POLL_INTERVAL_MS ?? "60000");
+  // Liveness heartbeat file (read by deploy/healthcheck.sh). Derived like the
+  // other data stores so it lands under the systemd-writable data/ dir.
+  const heartbeatPath = fileURLToPath(
+    new URL("../data/heartbeat.json", import.meta.url),
+  );
   console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);
   for (;;) {
     try {
       await pollOnce(deps);
+      // Heartbeat ONLY on the success path: a caught error below leaves the prior
+      // (now-stale) stamp, which is exactly the silent-stall signal the external
+      // healthcheck alerts on. Best-effort — never let a heartbeat write break the
+      // loop.
+      await writeHeartbeat(heartbeatPath, new Date().toISOString()).catch((e) =>
+        console.error(
+          "heartbeat write failed:",
+          e instanceof Error ? e.message : e,
+        ),
+      );
     } catch (e) {
       console.error("poll cycle failed:", e instanceof Error ? e.message : e);
     }

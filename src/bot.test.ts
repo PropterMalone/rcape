@@ -1,9 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AllowlistCache, type GraphClient } from "./allowlist.js";
-import { type BotDeps, classify, parseNotifyThreadDids } from "./bot.js";
+import {
+  type BotDeps,
+  classify,
+  parseNotifyThreadDids,
+  writeHeartbeat,
+} from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
 import {
   chargeQuota,
@@ -2180,5 +2185,22 @@ describe("parseNotifyThreadDids", () => {
     const { dids, warn } = parseNotifyThreadDids("@handle, did:plc:ccc");
     expect(dids).toEqual(["did:plc:ccc"]);
     expect(warn).toBe(false);
+  });
+});
+
+describe("writeHeartbeat", () => {
+  it("writes a JSON file holding a parseable ISO timestamp", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rcape-hb-"));
+    try {
+      const path = join(dir, "heartbeat.json");
+      const now = new Date().toISOString();
+      await writeHeartbeat(path, now);
+      const parsed = JSON.parse(await readFile(path, "utf8")) as { at: string };
+      expect(parsed.at).toBe(now);
+      // The stamp round-trips to a valid Date (what the healthcheck ages off of).
+      expect(Number.isNaN(Date.parse(parsed.at))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
