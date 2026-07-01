@@ -7,7 +7,10 @@
 // creating anything (it does query CourtListener, so that spend is still
 // recorded). Provisioned cases and per-case credentials land in data/ledger.json.
 
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { announceProvision } from "./announce.js";
+import { createBotAgent } from "./botAgent.js";
 import { fetchAndMapCase } from "./build.js";
 import {
   type FetchCheckpoint,
@@ -584,6 +587,47 @@ function ledgerPath(): string {
   return fileURLToPath(new URL("../data/ledger.json", import.meta.url));
 }
 
+// pattern: Imperative Shell
+// Announce a freshly-provisioned case on the bot feed (@ape.rcape.org), mirroring
+// what the @-mention bot (bot.ts) and pre-shelve harvest (harvest.ts) already do.
+// The manual CLI was the one provision path that never announced, so hand-pulled
+// cases never reached the bot's feed. Same opt-out switch (RCAPE_ANNOUNCE_PROVISIONS)
+// and same seal thumbnail as bot.ts. Best-effort: a bot-login or post failure is
+// logged and swallowed — the case is already provisioned and must not be undone by
+// a downstream announcement fault.
+async function announceProvisioned(
+  result: Extract<ProvisionResult, { status: "provisioned" }>,
+): Promise<void> {
+  const announce = !/^(0|false|no)$/i.test(
+    process.env.RCAPE_ANNOUNCE_PROVISIONS ?? "",
+  );
+  if (!announce) return;
+  try {
+    const agent = await createBotAgent({
+      host: process.env.PDS_HOSTNAME,
+      identifier: requireEnv("RCAPE_BOT_DID"),
+      password: requireEnv("RCAPE_BOT_PASSWORD"),
+    });
+    // Seal thumbnail for the case card; best-effort → text-only card on failure.
+    let cardThumb: unknown;
+    try {
+      const sealPath = fileURLToPath(
+        new URL("../assets/avatar.png", import.meta.url),
+      );
+      cardThumb = await agent.uploadBlob(await readFile(sealPath), "image/png");
+    } catch (e) {
+      console.warn(
+        `announce: card thumbnail unavailable: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+    await announceProvision({ agent, cardThumb, announce }, result);
+  } catch (e) {
+    console.error(
+      `announce: skipped for @${result.handle}: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
@@ -635,6 +679,7 @@ async function main(): Promise<void> {
       console.log(
         `done — @${result.handle} provisioned (${result.published} posts published, ${result.failed} failed).`,
       );
+      await announceProvisioned(result);
       break;
     case "error":
       console.error(result.message);
