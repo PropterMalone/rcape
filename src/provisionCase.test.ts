@@ -21,6 +21,7 @@ import {
 } from "./ledger.js";
 import {
   type ProvisionConfig,
+  announceProvisioned,
   postedHighWater,
   provisionMode,
   runProvision,
@@ -558,5 +559,58 @@ describe("postedHighWater", () => {
       entry("b", "002"),
     ];
     expect(postedHighWater(entries, [])).toBe("002");
+  });
+});
+
+describe("announceProvisioned", () => {
+  const provisioned = {
+    status: "provisioned" as const,
+    handle: "garciaguirre.rcape.org",
+    did: "did:plc:case",
+    caseName: "Garciaguirre v. Samsung Electronics Co., Ltd.",
+    docketNumber: "3:26-cv-06345",
+    courtName: "cand",
+    published: 23,
+    failed: 0,
+  };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("announces the new case via the injected bot agent (standalone post + @handle)", async () => {
+    vi.stubEnv("RCAPE_ANNOUNCE_PROVISIONS", "1");
+    const createRecord = vi.fn(async () => ({ uri: "at://x", cid: "c" }));
+    const uploadBlob = vi.fn(async () => ({ blob: 1 }));
+    await announceProvisioned(provisioned, {
+      createAgent: async () => ({ createRecord, uploadBlob }),
+    });
+    expect(createRecord).toHaveBeenCalledTimes(1);
+    const [collection, record] = createRecord.mock.calls[0] as unknown as [
+      string,
+      { text?: string; reply?: unknown },
+    ];
+    expect(collection).toBe("app.bsky.feed.post");
+    expect(record.reply).toBeUndefined(); // standalone announcement, not a reply
+    expect(record.text).toContain("Garciaguirre v. Samsung");
+    expect(record.text).toContain("@garciaguirre.rcape.org");
+  });
+
+  it("skips entirely (never logs in) when RCAPE_ANNOUNCE_PROVISIONS is disabled", async () => {
+    vi.stubEnv("RCAPE_ANNOUNCE_PROVISIONS", "false");
+    const createAgent = vi.fn();
+    await announceProvisioned(provisioned, { createAgent });
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it("swallows a bot-login failure — never throws, so it can't undo the provision", async () => {
+    vi.stubEnv("RCAPE_ANNOUNCE_PROVISIONS", "1");
+    await expect(
+      announceProvisioned(provisioned, {
+        createAgent: async () => {
+          throw new Error("bot login failed");
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 });

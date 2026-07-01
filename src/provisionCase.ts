@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { announceProvision } from "./announce.js";
-import { createBotAgent } from "./botAgent.js";
+import { type BotAgent, createBotAgent } from "./botAgent.js";
 import { fetchAndMapCase } from "./build.js";
 import {
   type FetchCheckpoint,
@@ -595,19 +595,26 @@ function ledgerPath(): string {
 // and same seal thumbnail as bot.ts. Best-effort: a bot-login or post failure is
 // logged and swallowed — the case is already provisioned and must not be undone by
 // a downstream announcement fault.
-async function announceProvisioned(
+export async function announceProvisioned(
   result: Extract<ProvisionResult, { status: "provisioned" }>,
+  deps: {
+    // Factory for the bot agent that posts the announcement (@ape.rcape.org).
+    // Defaults to a real createBotAgent login from RCAPE_BOT_* env; injected in tests.
+    createAgent?: () => Promise<Pick<BotAgent, "createRecord" | "uploadBlob">>;
+  } = {},
 ): Promise<void> {
   const announce = !/^(0|false|no)$/i.test(
     process.env.RCAPE_ANNOUNCE_PROVISIONS ?? "",
   );
   if (!announce) return;
   try {
-    const agent = await createBotAgent({
-      host: process.env.PDS_HOSTNAME,
-      identifier: requireEnv("RCAPE_BOT_DID"),
-      password: requireEnv("RCAPE_BOT_PASSWORD"),
-    });
+    const agent = deps.createAgent
+      ? await deps.createAgent()
+      : await createBotAgent({
+          host: process.env.PDS_HOSTNAME,
+          identifier: requireEnv("RCAPE_BOT_DID"),
+          password: requireEnv("RCAPE_BOT_PASSWORD"),
+        });
     // Seal thumbnail for the case card; best-effort → text-only card on failure.
     let cardThumb: unknown;
     try {
