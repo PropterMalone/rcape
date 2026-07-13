@@ -43,6 +43,17 @@ describe("buildReply", () => {
     }
   });
 
+  it("promises a fresh-filings check on exists only when one was forced", () => {
+    const checking = buildReply({
+      kind: "exists",
+      handle: "x.rcape.org",
+      checking: true,
+    }).text;
+    expect(checking.toLowerCase()).toContain("fresh filings");
+    const plain = buildReply({ kind: "exists", handle: "x.rcape.org" }).text;
+    expect(plain.toLowerCase()).not.toContain("fresh filings");
+  });
+
   it("surfaces the new handle on success and exists", () => {
     expect(
       buildReply({

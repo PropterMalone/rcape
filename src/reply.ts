@@ -41,7 +41,9 @@ export type ReplyKind =
   // backfill (0 on a clean run). Surfaced so the requester knows the archive is
   // partial — those entries exist as records but have no companion post yet.
   | { kind: "provisioned"; caseName: string; handle: string; failed: number }
-  | { kind: "exists"; handle: string }
+  // `checking` — a monitor re-check was forced for this case (the mention is a
+  // freshness signal), so the copy can honestly promise fresh filings shortly.
+  | { kind: "exists"; handle: string; checking?: boolean }
   // The requester is at their in-flight cap; their new docket wasn't queued.
   // docketId names the turned-away case so the reply isn't ambiguous when they
   // have several in flight.
@@ -127,7 +129,11 @@ export function buildReply(r: ReplyKind): BuiltReply {
       break;
     }
     case "exists":
-      text = `Ook. Already in the stacks — that case is at @${r.handle}.`;
+      text = `Ook. Already in the stacks — that case is at @${r.handle}.${
+        r.checking
+          ? " Checking the stacks for fresh filings now — anything new posts there shortly."
+          : ""
+      }`;
       break;
     case "over-cap":
       text = `Ook. Docket ${r.docketId} will have to wait — you already have ${r.inFlight} requests in my queue. I'll work through those first; mention me again once they clear. One ape, many stacks.`;

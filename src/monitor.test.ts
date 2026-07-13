@@ -10,6 +10,7 @@ import {
   chargeQuota,
   emptyLedger,
   loadLedger,
+  markMonitorDue,
   recordCase,
   saveLedger,
   tokenId,
@@ -159,6 +160,22 @@ describe("selectDueCases", () => {
     expect(selectDueCases(l, NOW, INTERVAL, 1).map((d) => d.docketId)).toEqual([
       2,
     ]); // cap
+  });
+
+  it("puts a markMonitorDue'd case first in the due list (epoch = oldest)", () => {
+    let l = emptyLedger();
+    l = recordCase(l, 1, completedCase({ lastCheckedAt: OLD })); // due, old
+    l = recordCase(
+      l,
+      2,
+      completedCase({ lastCheckedAt: "2026-06-16T12:00:00Z" }),
+    ); // recent — NOT due until forced
+    l = markMonitorDue(l, 2);
+    expect(selectDueCases(l, NOW, INTERVAL, 1).map((d) => d.docketId)).toEqual([
+      2,
+    ]);
+    // The backdate is a partial merge: the entry keeps its identity fields.
+    expect(l.cases["2"]?.handle).toBe(completedCase({}).handle);
   });
 
   it("skips non-completed cases and cases with no high-water", () => {

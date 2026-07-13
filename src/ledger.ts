@@ -220,6 +220,17 @@ export function recordCase(
   };
 }
 
+// Force a completed case due for the next monitor sweep: a mention of an
+// already-shelved case is a freshness signal (someone's looking at it right
+// now), so it shouldn't wait out the multi-day cadence. Backdating
+// lastCheckedAt to the epoch makes selectDueCases pick it FIRST (oldest-first
+// sort) on the same poll cycle. Partial merge — every other field survives.
+export function markMonitorDue(ledger: Ledger, docketId: number): Ledger {
+  return recordCase(ledger, docketId, {
+    lastCheckedAt: "1970-01-01T00:00:00.000Z",
+  } as CaseEntry);
+}
+
 // Every handle the ledger considers spoken-for: the live case handles AND the
 // handles of superseded (--force-displaced) accounts, which still exist on the
 // PDS with their DNS TXT. deriveHandle must avoid all of them — re-issuing a

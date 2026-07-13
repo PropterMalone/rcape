@@ -31,6 +31,7 @@ import {
   chargeAndRecord,
   findCase,
   loadLedger,
+  markMonitorDue,
   markTokenThrottled,
   mutateLedger,
   quotaRemaining,
@@ -308,7 +309,19 @@ async function replyOrNewThread(
 export type Action =
   | { kind: "ack-enqueue"; docketId: number }
   | { kind: "ack-queued"; docketId: number; ahead: number }
-  | { kind: "reply-exists"; handle: string; did?: string }
+  // docketFrom: where the docket id came from — the post's own text/links
+  // ("post") or the thread scan ("thread"). pollOnce suppresses reply-exists on
+  // a reply ONLY for "thread": a reply that itself hands over a docket link is
+  // the requester answering the bot's ask, and silence there reads as broken
+  // (live incident 2026-07-13). docketId is carried so the exists path can
+  // force a monitor re-check of the named case.
+  | {
+      kind: "reply-exists";
+      handle: string;
+      did?: string;
+      docketId: number;
+      docketFrom: "post" | "thread";
+    }
   | { kind: "reply-declined" }
   | { kind: "reply-no-docket" }
   // v1b: inference proposed a caption but the CL search didn't verify it as
@@ -324,6 +337,10 @@ export interface ClassifyInput {
   alreadyQueued: boolean;
   quotaOk: boolean;
   queueAhead: number;
+  // Provenance of a resolved docket id (absent ⇒ "post"): whether it came from
+  // the mention's own text/links or was re-found by the thread scan. Drives
+  // the reply-exists suppression rule — see the Action type.
+  docketFrom?: "post" | "thread";
 }
 
 // Pure decision: given the facts about a mention, what should the bot do?
@@ -336,6 +353,8 @@ export function classify(input: ClassifyInput): Action {
       kind: "reply-exists",
       handle: input.existingHandle,
       did: input.existingDid,
+      docketId: input.parsed.docketId,
+      docketFrom: input.docketFrom ?? "post",
     };
   }
   if (input.alreadyQueued) return { kind: "skip" };
@@ -380,6 +399,9 @@ export interface BotDeps {
     docketId: number,
     cfg: ProvisionConfig,
   ) => Promise<ProvisionResult>;
+  // Monitor seam (tests stub it so a due case doesn't send the real monitor to
+  // CourtListener). Absent ⇒ the real monitorOnce.
+  monitor?: (deps: BotDeps) => Promise<{ checked: number; updated: number }>;
   // v1b seams, both optional: absent (no RCAPE_GEMINI_API_KEY) the bot behaves
   // exactly as v1a. inferCase proposes a {caption, courtId} hint from prose;
   // searchDockets verifies it with ONE CL search call under `token`. Both
@@ -520,12 +542,19 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
         );
       }
     } else if (action.kind === "reply-exists") {
-      // Suppress on a reply: re-linking a case the bot already shelved in this
-      // thread (the "thank you!" case) is the redundant inline link we don't want.
-      if (!suppressNonActionable) {
+      // Suppress on a reply ONLY when the docket was re-found by the THREAD
+      // scan (the "thank you!" case — re-linking a case the bot already shelved
+      // in this thread is redundant noise). A reply whose OWN link names the
+      // case is the requester answering the bot's ask — silence there reads as
+      // broken (live incident 2026-07-13: "gave it a docket link, nada").
+      if (!suppressNonActionable || action.docketFrom === "post") {
+        // The mention is a freshness signal — force the case due so this
+        // cycle's monitor sweep picks up any new filings.
+        const checking = await forceMonitorDue(deps, action.docketId);
         const { text } = buildReply({
           kind: "exists",
           handle: action.handle,
+          checking,
         });
         await replyOrNewThread(
           deps,
@@ -637,7 +666,7 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
   // failure must never abort the poll cycle.
   let monitorUpdated = 0;
   try {
-    monitorUpdated = (await monitorOnce(deps)).updated;
+    monitorUpdated = (await (deps.monitor ?? monitorOnce)(deps)).updated;
   } catch (e) {
     console.error("monitor cycle failed:", e instanceof Error ? e.message : e);
   }
@@ -708,10 +737,16 @@ async function classifyMention(
   // Best-effort: a failed fetch falls through to the no-docket reply, never
   // throws (a thread read must not abort the cycle).
   let thread: ThreadView | null = null;
+  // Whether the docket id was re-found by the thread scan rather than carried
+  // by the post itself — the distinction the reply-exists suppression keys on.
+  let docketFromThread = false;
   if ("kind" in parsed) {
     thread = await deps.agent.getPostThread(m.uri).catch(() => null);
     const hit = thread ? scanThreadForDocket(thread) : null;
-    if (hit) parsed = hit;
+    if (hit) {
+      parsed = hit;
+      docketFromThread = true;
+    }
   }
   // `allowed` is checked BEFORE the search/inference steps: they spend a CL quota
   // call (and Gemini), and must be reserved for allowlisted requesters (the link
@@ -859,7 +894,31 @@ async function classifyMention(
     alreadyQueued,
     quotaOk,
     queueAhead,
+    docketFrom: docketFromThread ? "thread" : "post",
   });
+}
+
+// A mention that names an already-shelved case is a freshness signal: someone
+// is looking at the docket right now, so don't make new filings wait out the
+// multi-day monitor cadence. Backdate the case so THIS cycle's monitor sweep
+// (pollOnce runs it after mentions/drain) checks it first. The 60-min floor
+// keeps a mention storm from burning a CL call per mention. Returns whether a
+// check was actually forced, which drives the reply's "fresh filings" promise.
+const FORCE_CHECK_FLOOR_MS = 60 * 60 * 1000;
+async function forceMonitorDue(
+  deps: BotDeps,
+  docketId: number,
+): Promise<boolean> {
+  const ledger = await loadLedger(deps.cfg.ledgerPath);
+  const entry = findCase(ledger, docketId);
+  // Only cases the monitor would actually pick up (selectDueCases requires
+  // completed + highWater) — otherwise the reply copy would promise a check
+  // that never runs.
+  if (!entry?.completed || !entry.highWater) return false;
+  const lastMs = Date.parse(entry.lastCheckedAt ?? "") || 0;
+  if (Date.now() - lastMs < FORCE_CHECK_FLOOR_MS) return false;
+  await mutateLedger(deps.cfg.ledgerPath, (l) => markMonitorDue(l, docketId));
+  return true;
 }
 
 // When the drain stalls on a budget/rate limit, tell EVERY waiting requester once
@@ -1081,7 +1140,15 @@ async function drain(
         result,
       );
     } else if (result.status === "exists") {
-      const { text } = buildReply({ kind: "exists", handle: result.handle });
+      // Same freshness signal as the mention-path exists reply: the requester
+      // asked for this case (it just sat in the queue first), so force a
+      // monitor re-check rather than making new filings wait out the cadence.
+      const checking = await forceMonitorDue(deps, job.docketId);
+      const { text } = buildReply({
+        kind: "exists",
+        handle: result.handle,
+        checking,
+      });
       const card = buildCaseCard(
         {
           handle: result.handle,

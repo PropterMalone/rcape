@@ -55,7 +55,31 @@ describe("classify", () => {
   it("replies with the existing handle when already provisioned", () => {
     expect(
       classify({ ...base, allowed: true, existingHandle: "x.rcape.org" }),
-    ).toEqual({ kind: "reply-exists", handle: "x.rcape.org" });
+    ).toEqual({
+      kind: "reply-exists",
+      handle: "x.rcape.org",
+      docketId: 69777799,
+      docketFrom: "post",
+    });
+  });
+
+  it("tags reply-exists with the docket's provenance (thread scan vs the post itself)", () => {
+    // pollOnce suppresses reply-exists on a reply ONLY when the docket was
+    // re-found by the thread scan; a docket the reply itself carries is the
+    // requester answering the bot's ask and must be answered.
+    expect(
+      classify({
+        ...base,
+        allowed: true,
+        existingHandle: "x.rcape.org",
+        docketFrom: "thread",
+      }),
+    ).toEqual({
+      kind: "reply-exists",
+      handle: "x.rcape.org",
+      docketId: 69777799,
+      docketFrom: "thread",
+    });
   });
 
   it("skips a docket already queued", () => {
@@ -75,7 +99,13 @@ describe("classify", () => {
         existingDid: "did:y",
         alreadyQueued: true,
       }),
-    ).toEqual({ kind: "reply-exists", handle: "y.rcape.org", did: "did:y" });
+    ).toEqual({
+      kind: "reply-exists",
+      handle: "y.rcape.org",
+      did: "did:y",
+      docketId: 69777799,
+      docketFrom: "post",
+    });
   });
 
   it("acks + enqueues a fresh request with quota available", () => {
@@ -1323,13 +1353,15 @@ describe("thread-scan (v1a)", () => {
     }
   });
 
-  it("does NOT re-post the case link on a reply that resolves to an already-shelved case", async () => {
+  it("ANSWERS a reply whose OWN link resolves to an already-shelved case (the requester answered the bot's ask)", async () => {
+    // Live incident 2026-07-13: the bot asked for a link (no-docket reply), the
+    // requester handed one back, and the case was already shelved — the old
+    // blanket suppression ate the exists reply and the requester saw "nada".
     const { pollOnce } = await import("./bot.js");
     const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
     try {
       const ledgerPath = join(dir, "ledger.json");
       const queuePath = join(dir, "queue.json");
-      // Docket 69777799 already shelved (the bot posted its link in this thread).
       await saveLedger(
         ledgerPath,
         recordCase(emptyLedger(), 69777799, {
@@ -1338,16 +1370,16 @@ describe("thread-scan (v1a)", () => {
           password: "pw",
           createdAt: "2026-05-30",
           completed: true,
+          highWater: "2026-06-01.001",
+          lastCheckedAt: "2026-06-10T00:00:00.000Z",
         }),
       );
-      // A "thank you" reply that still carries the docket link → resolves to the
-      // existing case. On a reply, the link must NOT be re-posted.
       const replyMention: MentionNotif = {
         uri: "r-alice",
         cid: "cr",
         authorDid: "did:alice",
         authorHandle: "alice.test",
-        text: "thank you! https://www.courtlistener.com/docket/69777799/x/",
+        text: "https://www.courtlistener.com/docket/69777799/x/",
         links: ["https://www.courtlistener.com/docket/69777799/x/"],
         root: { uri: "m-root", cid: "cr" },
         source: "reply",
@@ -1359,29 +1391,136 @@ describe("thread-scan (v1a)", () => {
         cfg: baseCfg(ledgerPath),
         queuePath,
         provision: provisionStub,
+        // Stubbed so the forced-due case doesn't send the REAL monitor to
+        // CourtListener mid-test; the backdate itself is asserted below.
+        monitor: async () => ({ checked: 0, updated: 0 }),
+      };
+
+      await pollOnce(deps);
+
+      expect(replies).toHaveLength(1);
+      expect(replies[0]?.text).toContain("@abrego.rcape.org");
+      // The mention is a freshness signal: the case is backdated so THIS cycle's
+      // monitor sweep re-checks it for new filings, and the reply says so.
+      expect(replies[0]?.text.toLowerCase()).toContain("fresh filings");
+      const after = await loadLedger(ledgerPath);
+      expect(after.cases["69777799"]?.lastCheckedAt).toBe(
+        "1970-01-01T00:00:00.000Z",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent on a contentless reply whose docket only comes from the THREAD scan (the 'thanks!' case)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      const checkedAt = "2026-06-10T00:00:00.000Z";
+      await saveLedger(
+        ledgerPath,
+        recordCase(emptyLedger(), 69777799, {
+          did: "did:case",
+          handle: "abrego.rcape.org",
+          password: "pw",
+          createdAt: "2026-05-30",
+          completed: true,
+          highWater: "2026-06-01.001",
+          lastCheckedAt: checkedAt,
+        }),
+      );
+      // "thanks!" carries no link; the docket resolves only via the thread scan
+      // (the requester's original request post upthread). Re-linking is noise.
+      const replyMention: MentionNotif = {
+        uri: "r-alice",
+        cid: "cr",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
+        text: "thanks!",
+        root: { uri: "m-root", cid: "cr" },
+        source: "reply",
+      };
+      const thread: ThreadView = {
+        post: { record: { text: "thanks!" } },
+        parent: {
+          post: {
+            record: {
+              text: "shelve this?",
+              facets: [
+                linkFacet("https://www.courtlistener.com/docket/69777799/x/"),
+              ],
+            },
+          },
+        },
+      };
+      const { agent, replies } = mockAgent([replyMention], thread);
+      const deps: BotDeps = {
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+        monitor: async () => ({ checked: 0, updated: 0 }),
       };
 
       await pollOnce(deps);
 
       expect(replies).toHaveLength(0); // no redundant re-link
-      // But an explicit @-mention of the same existing case still replies.
+      // Suppressed noise is not a freshness signal — no forced re-check.
+      const after = await loadLedger(ledgerPath);
+      expect(after.cases["69777799"]?.lastCheckedAt).toBe(checkedAt);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the forced re-check (and its copy) when the case was checked within the hour", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      const justChecked = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      await saveLedger(
+        ledgerPath,
+        recordCase(emptyLedger(), 69777799, {
+          did: "did:case",
+          handle: "abrego.rcape.org",
+          password: "pw",
+          createdAt: "2026-05-30",
+          completed: true,
+          highWater: "2026-06-01.001",
+          lastCheckedAt: justChecked,
+        }),
+      );
       const mention: MentionNotif = {
-        ...replyMention,
         uri: "m-alice",
+        cid: "cm",
+        authorDid: "did:alice",
+        authorHandle: "alice.test",
         text: "@ape.rcape.org https://www.courtlistener.com/docket/69777799/x/",
+        links: ["https://www.courtlistener.com/docket/69777799/x/"],
+        root: { uri: "m-root", cid: "cm" },
         source: "mention",
       };
-      const { agent: agent2, replies: replies2 } = mockAgent([mention], null);
+      const { agent, replies } = mockAgent([mention], null);
       await pollOnce({
-        agent: agent2,
-        allowlist: new AllowlistCache(agent2.graph, "owner.test"),
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
         cfg: baseCfg(ledgerPath),
-        queuePath: join(dir, "queue2.json"),
+        queuePath,
         provision: provisionStub,
+        monitor: async () => ({ checked: 0, updated: 0 }),
       });
-      expect(replies2.some((r) => r.text.includes("@abrego.rcape.org"))).toBe(
-        true,
-      );
+
+      expect(replies).toHaveLength(1);
+      expect(replies[0]?.text).toContain("@abrego.rcape.org");
+      // Checked 5 min ago: no forced re-check, and the copy doesn't promise one.
+      expect(replies[0]?.text.toLowerCase()).not.toContain("fresh filings");
+      const after = await loadLedger(ledgerPath);
+      expect(after.cases["69777799"]?.lastCheckedAt).toBe(justChecked);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
