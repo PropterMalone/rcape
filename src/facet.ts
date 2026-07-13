@@ -18,6 +18,10 @@ export interface LinkFacet {
   features: Array<{ $type: "app.bsky.richtext.facet#link"; uri: string }>;
 }
 
+// A reply's facets mix kinds: mention facets for @handles plus link facets for
+// the failure-reply search link.
+export type Facet = MentionFacet | LinkFacet;
+
 // Build #link facets for every http(s) URL in `text` so plain-text URLs (e.g. in
 // the pinned directory post) render as tappable links. Without a facet a URL is
 // inert text. Offsets are UTF-8 BYTE indices, same as mentionFacets — a multibyte

@@ -1,9 +1,13 @@
 // pattern: Functional Core
 // Builds the bot's reply text for each outcome, in the dignified Pratchett-
 // Librarian register. Pure: no I/O. Case names are clamped so the payload (the
-// new @handle) always survives the 300-grapheme post limit.
+// new @handle) always survives the 300-grapheme post limit. Failure-to-find
+// replies carry a clickable CourtListener search link (a #link facet over a
+// shortened display span — the full prefilled-query URL would blow the
+// grapheme budget as text).
 
-import { truncate } from "./companionPost.js";
+import { graphemeLen, truncate } from "./companionPost.js";
+import type { LinkFacet } from "./facet.js";
 
 const MAX_POST = 300;
 const NAME_BUDGET = 80;
@@ -13,6 +17,20 @@ const NAME_BUDGET = 80;
 // facet, so copy and facet map stay in sync. (Bare, not the full bsky handle —
 // it renders short; the facet's `did` is what makes it resolve + notify.)
 export const OWNER_DISPLAY_HANDLE = "proptermalone";
+
+const CL_BASE = "https://www.courtlistener.com";
+// The visible link span is clamped hard: it's display text only (the facet
+// carries the full URI), and an unbounded encoded caption would eat the body's
+// grapheme budget.
+const LINK_DISPLAY_MAX = 40;
+const LINK_LEAD = "\n\n🔎 ";
+
+export interface BuiltReply {
+  text: string;
+  // #link facets for the search link, with byte offsets valid for `text`.
+  // Callers merge these with the mention facets they compute over the text.
+  facets: LinkFacet[];
+}
 
 export type ReplyKind =
   // ack/queued fire at mention time, before any CL fetch — only the docket id
@@ -48,7 +66,45 @@ export type ReplyKind =
   // permanent silence after the ack.
   | { kind: "failed"; docketId: number };
 
-export function buildReply(r: ReplyKind): string {
+// The CL search URL for a failure reply: prefilled RECAP search when we have a
+// caption guess, the bare RECAP search page otherwise. The query caption is
+// sliced (not truncate()d — a trailing "…" would pollute the search terms);
+// URLSearchParams encodes spaces as "+" so typical captions stay short.
+function searchUri(caption?: string): string {
+  if (caption === undefined) return `${CL_BASE}/recap/`;
+  const q = new URLSearchParams({
+    q: caption.trim().slice(0, 100),
+    type: "r",
+  });
+  return `${CL_BASE}/?${q}`;
+}
+
+// Append a clickable search link to a failure reply's body. The body is clamped
+// so body + link fit MAX_POST together — truncating AFTER appending would chop
+// the link, and a broken link is worse than a short body. The facet's byte
+// range covers exactly the display span (UTF-8 bytes, per the richtext spec —
+// the 🔎 and any multibyte body chars shift it past char offsets).
+function withSearchLink(body: string, uri: string): BuiltReply {
+  const display = truncate(
+    uri.replace(/^https:\/\/www\./, ""),
+    LINK_DISPLAY_MAX,
+  );
+  const tail = `${LINK_LEAD}${display}`;
+  const text = `${truncate(body, MAX_POST - graphemeLen(tail))}${tail}`;
+  const byteEnd = Buffer.byteLength(text, "utf8");
+  const byteStart = byteEnd - Buffer.byteLength(display, "utf8");
+  return {
+    text,
+    facets: [
+      {
+        index: { byteStart, byteEnd },
+        features: [{ $type: "app.bsky.richtext.facet#link", uri }],
+      },
+    ],
+  };
+}
+
+export function buildReply(r: ReplyKind): BuiltReply {
   let text: string;
   switch (r.kind) {
     case "ack":
@@ -85,27 +141,33 @@ export function buildReply(r: ReplyKind): string {
       // Acknowledge the mention (the requester knows I heard them), then ask for
       // the missing docket — not a bare broadcast of instructions. "Reply with"
       // (not "mention me again") because a plain reply with a link now works.
-      text =
-        "Ook? I hear you, but I couldn't find a docket in that. Reply with a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case.";
-      break;
-    case "suggest":
+      // The search link gives them somewhere to FIND that link.
+      return withSearchLink(
+        "Ook? I hear you, but I couldn't find a docket in that. Reply with a CourtListener docket — a link (courtlistener.com/docket/…) or its id — and I'll fetch the case. Search the stacks:",
+        searchUri(),
+      );
+    case "suggest": {
       // The guessed caption shows the requester what the Librarian understood,
       // so a wrong guess is self-explanatory and the fix (a link) is obvious.
+      // The appended link opens CL search prefilled with the guess, so finding
+      // the right docket is one tap, not a fresh search.
       if (r.matches === 0) {
-        text = `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Reply with the CourtListener docket link and I'll fetch it.`;
+        text = `Ook? My best guess was “${truncate(r.caption, NAME_BUDGET)}”, but the stacks show no such docket. Reply with the CourtListener docket link and I'll fetch it. Search the stacks:`;
       } else if (r.matches === 1) {
         // Exactly one match, but it came from a name guess — a same-name docket
         // can be the wrong one (a Joe-Biden post → the Hunter-Biden-IRS case), so
         // confirm rather than shelve. Singular grammar, confirm framing.
-        text = `Ook — I think you mean ${truncate(r.caption, NAME_BUDGET)}, but I won't shelve a case from a name guess. If that's the one, reply with its CourtListener link and I'll fetch it; if not, send the right link.`;
+        text = `Ook — I think you mean ${truncate(r.caption, NAME_BUDGET)}, but I won't shelve a case from a name guess. If that's the one, reply with its CourtListener link and I'll fetch it; if not, send the right link. Here's my search:`;
       } else {
-        text = `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Reply with the CourtListener link for yours and I'll fetch it.`;
+        text = `Ook — did you mean ${truncate(r.caption, NAME_BUDGET)}? I found ${r.matches} dockets like that. Reply with the CourtListener link for yours and I'll fetch it. Here's my search:`;
       }
-      break;
+      return withSearchLink(text, searchUri(r.caption));
+    }
     case "not-found":
-      text =
-        "Ook. No such docket in CourtListener's stacks. Double-check the id or link?";
-      break;
+      return withSearchLink(
+        "Ook. No such docket in CourtListener's stacks. Double-check the id or link — or search the stacks:",
+        searchUri(),
+      );
     case "deferred":
       text = `Ook. I've reached today's CourtListener limit — docket ${r.docketId} is shelved in the queue and I'll finish it tomorrow.`;
       break;
@@ -116,5 +178,5 @@ export function buildReply(r: ReplyKind): string {
       text = `Ook. I couldn't shelve docket ${r.docketId} — the stacks gave way after a few tries. Mention me again later and I'll have another go.`;
       break;
   }
-  return truncate(text, MAX_POST);
+  return { text: truncate(text, MAX_POST), facets: [] };
 }

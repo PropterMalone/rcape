@@ -18,7 +18,7 @@ import { BOT_SELF_LABEL } from "./companionPost.js";
 import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
 import { regenerateDirectory } from "./directorySync.js";
-import { type MentionFacet, mentionFacets } from "./facet.js";
+import { type Facet, type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
 import {
   type HarvestConfig,
@@ -280,7 +280,7 @@ async function replyOrNewThread(
   root: StrongRef,
   engager: { handle: string; did: string },
   text: string,
-  facets?: MentionFacet[],
+  facets?: Facet[],
   embed?: unknown,
 ): Promise<StrongRef> {
   if (!isNotifyRooted(root, deps.notifyThreadDids)) {
@@ -477,7 +477,7 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
 
     if (action.kind === "reply-declined") {
       if (!suppressNonActionable) {
-        const text = buildReply({ kind: "declined" });
+        const { text } = buildReply({ kind: "declined" });
         await replyOrNewThread(
           deps,
           parent,
@@ -489,12 +489,14 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       }
     } else if (action.kind === "reply-no-docket") {
       if (!suppressNonActionable) {
+        const built = buildReply({ kind: "no-docket" });
         await replyOrNewThread(
           deps,
           parent,
           m.root,
           engager,
-          buildReply({ kind: "no-docket" }),
+          built.text,
+          built.facets,
         );
       }
     } else if (action.kind === "reply-suggest") {
@@ -503,23 +505,28 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       // in. (classifyMention already skips the CL-spending search on a reply, so
       // this branch is normally unreachable on a reply — the gate makes it explicit.)
       if (!suppressNonActionable) {
+        const built = buildReply({
+          kind: "suggest",
+          caption: action.caption,
+          matches: action.matches,
+        });
         await replyOrNewThread(
           deps,
           parent,
           m.root,
           engager,
-          buildReply({
-            kind: "suggest",
-            caption: action.caption,
-            matches: action.matches,
-          }),
+          built.text,
+          built.facets,
         );
       }
     } else if (action.kind === "reply-exists") {
       // Suppress on a reply: re-linking a case the bot already shelved in this
       // thread (the "thank you!" case) is the redundant inline link we don't want.
       if (!suppressNonActionable) {
-        const text = buildReply({ kind: "exists", handle: action.handle });
+        const { text } = buildReply({
+          kind: "exists",
+          handle: action.handle,
+        });
         await replyOrNewThread(
           deps,
           parent,
@@ -557,12 +564,12 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
 
         const ackText =
           action.kind === "ack-enqueue"
-            ? buildReply({ kind: "ack", docketId: action.docketId })
+            ? buildReply({ kind: "ack", docketId: action.docketId }).text
             : buildReply({
                 kind: "queued",
                 docketId: action.docketId,
                 ahead: action.ahead,
-              });
+              }).text;
         const ackRef = await replyOrNewThread(
           deps,
           parent,
@@ -592,7 +599,7 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
             kind: "over-cap",
             inFlight: perRequesterQueued(queue, m.authorDid),
             docketId: action.docketId,
-          }),
+          }).text,
         );
         continue;
       }
@@ -884,7 +891,7 @@ async function notifyAllDeferred(
       job.ackRef ?? job.mention,
       job.rootRef,
       { handle: job.requesterHandle, did: job.requesterDid },
-      buildReply({ kind, docketId: job.docketId }),
+      buildReply({ kind, docketId: job.docketId }).text,
     );
   }
   return q;
@@ -1038,7 +1045,7 @@ async function drain(
 
     if (result.status === "provisioned") {
       provisioned = true;
-      const text = buildReply({
+      const { text } = buildReply({
         kind: "provisioned",
         caseName: result.caseName,
         handle: result.handle,
@@ -1074,7 +1081,7 @@ async function drain(
         result,
       );
     } else if (result.status === "exists") {
-      const text = buildReply({ kind: "exists", handle: result.handle });
+      const { text } = buildReply({ kind: "exists", handle: result.handle });
       const card = buildCaseCard(
         {
           handle: result.handle,
@@ -1095,12 +1102,14 @@ async function drain(
         card,
       );
     } else if (result.status === "not-found") {
+      const built = buildReply({ kind: "not-found" });
       await replyOrNewThread(
         deps,
         parent,
         job.rootRef,
         { handle: job.requesterHandle, did: job.requesterDid },
-        buildReply({ kind: "not-found" }),
+        built.text,
+        built.facets,
       );
     } else if (result.status === "error" && willRetry) {
       // Transient error, backed off for another attempt — no reply yet. Log only
@@ -1122,7 +1131,7 @@ async function drain(
         parent,
         job.rootRef,
         { handle: job.requesterHandle, did: job.requesterDid },
-        buildReply({ kind: "failed", docketId: job.docketId }),
+        buildReply({ kind: "failed", docketId: job.docketId }).text,
       );
     }
   }

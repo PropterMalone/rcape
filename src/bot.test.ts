@@ -116,7 +116,7 @@ function mockAgent(mentions: MentionNotif[], thread: ThreadView | null = null) {
   const replies: {
     parent: StrongRef;
     text: string;
-    facets?: import("./facet.js").MentionFacet[];
+    facets?: import("./facet.js").Facet[];
     embed?: unknown;
   }[] = [];
   const seenAts: string[] = [];
@@ -406,11 +406,11 @@ describe("pollOnce", () => {
       expect(replies[1]?.text).toContain("@abrego-garcia.rcape.org"); // done
       // The done reply carries a mention facet for the new case account, so the
       // provisioned account is notified and the @handle links.
-      const doneFacet = replies[1]?.facets?.[0];
-      expect(doneFacet?.features[0]?.did).toBe("did:case");
-      expect(doneFacet?.features[0]?.$type).toBe(
-        "app.bsky.richtext.facet#mention",
-      );
+      const doneFeature = replies[1]?.facets?.[0]?.features[0];
+      expect(doneFeature).toEqual({
+        $type: "app.bsky.richtext.facet#mention",
+        did: "did:case",
+      });
       // The done reply also carries a link card to the case profile (thumb is
       // wired separately via deps.cardThumb, unset in this test → text card).
       const card = replies[1]?.embed as {
@@ -1912,6 +1912,14 @@ describe("prose inference (v1b)", () => {
       expect(r.replies).toHaveLength(1);
       expect(r.replies[0]?.text.toLowerCase()).toContain("did you mean");
       expect(r.replies[0]?.text).toContain("3");
+      // The suggest reply carries the prefilled-search link facet through to
+      // the posted reply — buildReply's facets must not be dropped at the
+      // call site (they were, before the CL-search-link feature).
+      const linkFeature = r.replies[0]?.facets?.[0]?.features[0];
+      expect(linkFeature).toEqual({
+        $type: "app.bsky.richtext.facet#link",
+        uri: "https://www.courtlistener.com/?q=Abrego+Garcia+v.+Noem&type=r",
+      });
       expect(r.queue.jobs).toHaveLength(0);
     } finally {
       await r.cleanup();

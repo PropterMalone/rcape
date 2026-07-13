@@ -7,11 +7,7 @@ import { AtpAgent } from "@atproto/api";
 import type { GraphClient } from "./allowlist.js";
 import { DEFAULT_PDS_HOST } from "./caseRepo.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
-import {
-  type MentionFacet,
-  type RichtextRecord,
-  extractPostLinks,
-} from "./facet.js";
+import { type Facet, type RichtextRecord, extractPostLinks } from "./facet.js";
 import type { StrongRef } from "./queue.js";
 import type { ThreadView } from "./thread.js";
 import {
@@ -74,7 +70,7 @@ export interface BotAgent {
     parent: StrongRef,
     root: StrongRef,
     text: string,
-    facets?: MentionFacet[],
+    facets?: Facet[],
     // Optional link card (app.bsky.embed.external). Opaque here; built by card.ts
     // and rendered below the reply text. Omitted ⇒ a plain text+facets reply.
     embed?: unknown,
