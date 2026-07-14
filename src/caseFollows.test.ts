@@ -8,6 +8,7 @@ import {
   completedCaseDids,
   followShelvedCasesOnce,
   followSubject,
+  parseInterval,
 } from "./caseFollows.js";
 import {
   type CaseEntry,
@@ -42,6 +43,24 @@ describe("casesToFollow (pure diff)", () => {
     expect(
       casesToFollow(["did:a", "", undefined as unknown as string], new Set()),
     ).toEqual(["did:a"]);
+  });
+});
+
+describe("parseInterval (malformed-env guard)", () => {
+  const DEFAULT = 6 * 60 * 60 * 1000;
+  it("honors a finite positive override", () => {
+    expect(parseInterval("1800000")).toBe(1_800_000);
+  });
+  it("falls back to the default on NaN (a typo — would wedge: never due)", () => {
+    expect(parseInterval("abc")).toBe(DEFAULT);
+  });
+  it("falls back to the default on empty string (would spin: 0 → due every poll)", () => {
+    expect(parseInterval("")).toBe(DEFAULT);
+  });
+  it("falls back on zero/negative and undefined", () => {
+    expect(parseInterval("0")).toBe(DEFAULT);
+    expect(parseInterval("-5")).toBe(DEFAULT);
+    expect(parseInterval(undefined)).toBe(DEFAULT);
   });
 });
 
@@ -129,6 +148,19 @@ describe("followShelvedCasesOnce (shell)", () => {
     expect(
       created.map((c) => (c.record as { subject: string }).subject).sort(),
     ).toEqual(["did:1", "did:2", "did:3"]);
+    // Assert the full follow-record SHAPE, not just the subject: a lexicon
+    // regression (wrong $type, missing createdAt) would otherwise 400 at the PDS,
+    // be swallowed by the best-effort catch, and silently kill the feature with
+    // the suite still green.
+    const rec = created[0]?.record as {
+      $type: string;
+      subject: string;
+      createdAt: string;
+    };
+    expect(rec.$type).toBe("app.bsky.graph.follow");
+    expect(typeof rec.subject).toBe("string");
+    expect(() => new Date(rec.createdAt).toISOString()).not.toThrow();
+    expect(rec.createdAt).toBe("2026-07-14T12:00:00.000Z");
     // Cadence marker stamped so the next cycle doesn't re-list until due.
     const after = await loadLedger(ledgerPath);
     expect(after.follows?.sweptAt).toBe("2026-07-14T12:00:00.000Z");

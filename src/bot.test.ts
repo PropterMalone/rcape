@@ -214,6 +214,50 @@ function aliceMention(): MentionNotif {
   };
 }
 
+describe("pollOnce follows the shelf (caseFollows wiring)", () => {
+  it("creates a follow record for a completed case on a poll (first-run sweep)", async () => {
+    const { pollOnce } = await import("./bot.js");
+    const dir = await mkdtemp(join(tmpdir(), "rcape-bot-"));
+    try {
+      const ledgerPath = join(dir, "ledger.json");
+      const queuePath = join(dir, "queue.json");
+      // Completed case with did+handle but NO highWater: the monitor skips it (no
+      // CL call) while the follow sweep still picks it up. sweptAt is absent, so
+      // the sweep is due on this first poll even without a shelf change.
+      await saveLedger(
+        ledgerPath,
+        recordCase(emptyLedger(), 42, {
+          did: "did:case42",
+          handle: "case42.rcape.org",
+          password: "pw",
+          createdAt: "2026-05-30",
+          completed: true,
+        } as Parameters<typeof recordCase>[2]),
+      );
+      const { agent, posts } = mockAgent([]); // no mentions
+      await pollOnce({
+        agent,
+        allowlist: new AllowlistCache(agent.graph, "owner.test"),
+        cfg: baseCfg(ledgerPath),
+        queuePath,
+        provision: provisionStub,
+      });
+
+      const follows = posts.filter(
+        (p) => p.collection === "app.bsky.graph.follow",
+      );
+      expect(follows).toHaveLength(1);
+      expect((follows[0]?.record as { subject: string }).subject).toBe(
+        "did:case42",
+      );
+      // Stamped, so a subsequent poll within the interval is a no-op.
+      expect((await loadLedger(ledgerPath)).follows?.sweptAt).toBeTruthy();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("drain error logging (no credential leak)", () => {
   it("never logs the raw provision result or a credential-bearing message", async () => {
     const { pollOnce } = await import("./bot.js");

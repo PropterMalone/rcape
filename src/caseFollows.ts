@@ -24,8 +24,18 @@ const FOLLOW = "app.bsky.graph.follow";
 // cycle they're shelved; this interval is only the drift backstop (a failed
 // follow, a case provisioned by a path that didn't force a sweep). Overridable
 // for tests/ops via RCAPE_FOLLOW_SWEEP_INTERVAL_MS.
-const FOLLOW_SWEEP_INTERVAL_MS = Number(
-  process.env.RCAPE_FOLLOW_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000,
+const DEFAULT_FOLLOW_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+// Guard a malformed env override. A bare Number() lets a typo silently break the
+// gate: "abc" → NaN (nowMs - swept >= NaN is always false → NEVER due, the sweep
+// dies), and "" → 0 (always due → re-lists the PDS every 60s poll, a spin). Only
+// a finite positive number is honored; anything else falls back to the default.
+export function parseInterval(raw: string | undefined): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_FOLLOW_SWEEP_INTERVAL_MS;
+}
+const FOLLOW_SWEEP_INTERVAL_MS = parseInterval(
+  process.env.RCAPE_FOLLOW_SWEEP_INTERVAL_MS,
 );
 
 // The minimal deps the sweep needs — a structural subset of BotDeps, so pollOnce
