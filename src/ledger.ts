@@ -81,6 +81,12 @@ export interface Ledger {
   // it's minted once and persisted here so the list's AT-URI stays stable across
   // restarts/regenerations — followers reference that URI, so it must never change.
   directory?: { listRkey?: string };
+  // Case-follow sweep cadence marker (same role as `watchlist`/`harvest`): @ape
+  // follows every shelved case account so its Following tab is a native, in-Bluesky
+  // directory of the archive. The sweep re-lists the bot's own follow records only
+  // after the interval OR on a shelf change, so a 60s poll doesn't re-list every
+  // cycle. Absent ⇒ never swept (triggers the first-run backfill of the shelf).
+  follows?: { sweptAt?: string };
 }
 
 // CourtListener free tier: 125 requests/day per token.
@@ -184,6 +190,12 @@ export function recordHarvestSwept(ledger: Ledger, iso: string): Ledger {
 // first directory regenerate and reused forever after — see Ledger.directory.
 export function recordDirectoryListRkey(ledger: Ledger, rkey: string): Ledger {
   return { ...ledger, directory: { ...ledger.directory, listRkey: rkey } };
+}
+
+// Stamp the case-follow sweep's last run (pure merge). Drives the sweep's cadence
+// gate, mirroring recordWatchlistSwept/recordHarvestSwept.
+export function recordFollowsSwept(ledger: Ledger, iso: string): Ledger {
+  return { ...ledger, follows: { ...ledger.follows, sweptAt: iso } };
 }
 
 export function recordCase(
@@ -488,6 +500,8 @@ function normalize(parsed: Partial<Ledger>): Ledger {
   if (parsed.harvest) out.harvest = parsed.harvest;
   // Carry the public-directory state (the persisted graph.list TID rkey) through.
   if (parsed.directory) out.directory = parsed.directory;
+  // Carry the case-follow sweep cadence marker through load/mutate.
+  if (parsed.follows) out.follows = parsed.follows;
   return out;
 }
 

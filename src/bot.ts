@@ -13,6 +13,7 @@ import { saveJson } from "./atomicJson.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
 import { buildCaseCard } from "./card.js";
+import { followShelvedCasesOnce } from "./caseFollows.js";
 import type { CaseHint } from "./caseHint.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
 import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
@@ -707,13 +708,27 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
   // Regenerate the public directory ONCE per cycle when the shelf changed (a new
   // provision, monitor-added filings, a watchlist auto-shelve, or a pre-shelve).
   // regenerateDirectory is itself best-effort and never throws.
-  if (
+  const shelfChanged =
     provisioned ||
     monitorUpdated > 0 ||
     watchlistProvisioned > 0 ||
-    preshelveProvisioned > 0
-  ) {
+    preshelveProvisioned > 0;
+  if (shelfChanged) {
     await regenerateDirectory(deps);
+  }
+
+  // Follow every shelved case so @ape's "Following" tab is a native, in-Bluesky
+  // directory of the archive (tap @ape → Following → any case). Quota-free (bot's
+  // own PDS only). Forced on a shelf change so a new case is followed the same
+  // cycle; otherwise self-gated by its own interval (a drift backstop). Best-effort:
+  // a sweep failure must never abort the poll cycle.
+  try {
+    await followShelvedCasesOnce(deps, { force: shelfChanged });
+  } catch (e) {
+    console.error(
+      "follow sweep failed:",
+      e instanceof Error ? e.message : String(e),
+    );
   }
 }
 
