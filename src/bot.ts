@@ -16,7 +16,11 @@ import { buildCaseCard } from "./card.js";
 import { followShelvedCasesOnce } from "./caseFollows.js";
 import type { CaseHint } from "./caseHint.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
-import { CourtListenerClient, parseClTokens } from "./courtlistener.js";
+import {
+  CourtListenerClient,
+  ThrottledError,
+  parseClTokens,
+} from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
 import { regenerateDirectory } from "./directorySync.js";
 import { type Facet, type MentionFacet, mentionFacets } from "./facet.js";
@@ -325,6 +329,7 @@ export type Action =
     }
   | { kind: "reply-declined" }
   | { kind: "reply-no-docket" }
+  | { kind: "reply-throttled" }
   // v1b: inference proposed a caption but the CL search didn't verify it as
   // exactly one docket (matches = the search's count: 0 or ≥2).
   | { kind: "reply-suggest"; caption: string; matches: number }
@@ -420,7 +425,8 @@ export interface BotDeps {
   // Independent of Gemini: when the mention names a PACER case number, search CL
   // by docket number (precise) instead of inferring a caption. Always wired (it
   // needs only a CL token), so case-number resolution works even with no Gemini
-  // key. Returns null on any failure (degrade to the no-docket reply).
+  // key. Returns null on non-throttle failures (degrade to the no-docket reply);
+  // ThrottledError propagates so the reply layer can report the rate limit.
   searchByDocketNumber?: (
     caseNumber: string,
     courtId: string | null,
@@ -484,7 +490,13 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
       continue;
     }
 
-    const action = await classifyMention(m, deps, queue);
+    let action: Action;
+    try {
+      action = await classifyMention(m, deps, queue);
+    } catch (e) {
+      if (!(e instanceof ThrottledError)) throw e;
+      action = { kind: "reply-throttled" };
+    }
     const parent: StrongRef = { uri: m.uri, cid: m.cid };
 
     // A plain reply (not an explicit @-mention) that yields nothing NEW gets
@@ -522,6 +534,9 @@ export async function pollOnce(deps: BotDeps): Promise<void> {
           built.facets,
         );
       }
+    } else if (action.kind === "reply-throttled") {
+      const { text } = buildReply({ kind: "lookup-throttled" });
+      await replyOrNewThread(deps, parent, m.root, engager, text);
     } else if (action.kind === "reply-suggest") {
       // Suppress on a reply, like its declined/no-docket/exists siblings: a
       // "did you mean" is non-actionable noise in a thread the bot already replied
@@ -803,9 +818,29 @@ async function classifyMention(
         // courtId scopes bankruptcy numbers (which collide across courts) to one
         // docket; it's null for the self-unique district format, leaving that
         // search byte-identical to before.
-        const res = await deps
-          .searchByDocketNumber(ref.caseNumber, ref.courtId, token)
-          .catch(() => null);
+        let res: ClSearchPage | null;
+        try {
+          res = await deps.searchByDocketNumber(
+            ref.caseNumber,
+            ref.courtId,
+            token,
+          );
+        } catch (e) {
+          if (!(e instanceof ThrottledError)) {
+            res = null;
+          } else {
+            // The call was already charged above. Reconcile the typed throttle by
+            // cooling down this token until CL says its rate window reopens, then
+            // let pollOnce's reply layer turn it into an honest user-facing reply.
+            const until = new Date(
+              Date.now() + Math.min(e.retryAfterMs, MAX_THROTTLE_BACKOFF_MS),
+            ).toISOString();
+            await mutateLedger(deps.cfg.ledgerPath, (fresh) =>
+              markTokenThrottled(fresh, token, until),
+            );
+            throw e;
+          }
+        }
         if (res && res.count === 1 && res.results[0]) {
           parsed = { docketId: res.results[0].docket_id };
         } else if (res) {
@@ -1347,6 +1382,7 @@ async function main(): Promise<void> {
           courtId ?? undefined,
         );
       } catch (e) {
+        if (e instanceof ThrottledError) throw e;
         console.error(
           "docket-number search failed:",
           e instanceof Error ? e.message : String(e),

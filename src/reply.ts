@@ -55,6 +55,9 @@ export type ReplyKind =
   // (0 = no such case found, ≥2 = ambiguous).
   | { kind: "suggest"; caption: string; matches: number }
   | { kind: "not-found" }
+  // A docket-number lookup hit CL's rate window before a docket id was known.
+  // Unlike `throttled` below, there is no queued job to promise we'll resume.
+  | { kind: "lookup-throttled" }
   // Posted once when today's CourtListener budget runs out before a started
   // (acked) case could finish — so a large docket that exceeds the daily limit
   // mid-shelving doesn't leave the requester waiting on a "shelved" reply that
@@ -174,6 +177,10 @@ export function buildReply(r: ReplyKind): BuiltReply {
         "Ook. No such docket in CourtListener's stacks. Double-check the id or link — or search the stacks:",
         searchUri(),
       );
+    case "lookup-throttled":
+      text =
+        "Ook. CourtListener's stacks are busy (rate limit) — I can't look up that docket number just now. Please try me again after the limit clears.";
+      break;
     case "deferred":
       text = `Ook. I've reached today's CourtListener limit — docket ${r.docketId} is shelved in the queue and I'll finish it tomorrow.`;
       break;

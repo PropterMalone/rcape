@@ -12,6 +12,7 @@ import {
   writeHeartbeat,
 } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
+import { ThrottledError } from "./courtlistener.js";
 import {
   chargeQuota,
   emptyLedger,
@@ -1956,6 +1957,25 @@ describe("prose inference (v1b)", () => {
       expect(inferCase).not.toHaveBeenCalled(); // precise number+court wins; Gemini skipped
       expect(r.replies).toHaveLength(2); // ack + provisioned
       expect(r.queue.jobs[0]?.docketId).toBe(69777799);
+    } finally {
+      await r.cleanup();
+    }
+  });
+
+  it("replies with the rate limit when docket-number search is throttled, not no-docket", async () => {
+    const r = await run({
+      mention: caseNumberMention(),
+      thread: null,
+      searchByDocketNumber: async () => {
+        throw new ThrottledError(60_000);
+      },
+    });
+    try {
+      expect(r.replies).toHaveLength(1);
+      expect(r.replies[0]?.text.toLowerCase()).toContain("rate limit");
+      expect(r.replies[0]?.text.toLowerCase()).toContain("try me again");
+      expect(r.replies[0]?.text).not.toContain("couldn't find a docket");
+      expect(r.queue.jobs).toHaveLength(0);
     } finally {
       await r.cleanup();
     }
