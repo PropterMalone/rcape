@@ -85,3 +85,14 @@ describe("appendCycleOutcome", () => {
     expect(s.failures).toBe(1);
   });
 });
+
+// Regression for the wrap /angel finding: the rate signal must not be able to
+// die permanently. bot.recordCycleOutcome catches the unreadable-state throw and
+// starts fresh; this covers the pure half — a fresh window is well-formed.
+describe("recovery after an unreadable window", () => {
+  it("a fresh window built from null is immediately valid", () => {
+    const s = appendCycleOutcome(null, false, T(0), 10);
+    expect(s).toMatchObject({ window: 10, total: 1, failures: 1 });
+    expect(s.recent).toHaveLength(1);
+  });
+});

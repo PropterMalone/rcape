@@ -4,6 +4,7 @@ import {
   type MentionNotif,
   isRecordNotFound,
   paginateMentions,
+  retargetWarning,
 } from "./botAgent.js";
 
 // A page of raw listNotifications data, shaped like the AtpAgent response.
@@ -116,5 +117,28 @@ describe("isRecordNotFound", () => {
     expect(isRecordNotFound({ error: "AuthRequired" })).toBe(false);
     expect(isRecordNotFound(null)).toBe(false);
     expect(isRecordNotFound("nope")).toBe(false);
+  });
+});
+
+describe("retargetWarning", () => {
+  const LOOPBACK = "http://127.0.0.1:2583";
+
+  it("silent when the session kept the transport we configured", () => {
+    expect(retargetWarning(LOOPBACK, "http://127.0.0.1:2583")).toBeUndefined();
+    // Same origin, different trailing form — not a re-target.
+    expect(retargetWarning(LOOPBACK, "http://127.0.0.1:2583/")).toBeUndefined();
+  });
+
+  it("silent when the library exposes no resolved URL at all", () => {
+    expect(retargetWarning(LOOPBACK, undefined)).toBeUndefined();
+  });
+
+  // The failure this exists for: the DID doc names the PUBLIC host, so a library
+  // change that starts preferring it silently restores the hairpin.
+  it("warns when the DID document pulled the session back to the public host", () => {
+    const msg = retargetWarning(LOOPBACK, "https://pds.rcape.org");
+    expect(msg).toMatch(/RE-TARGETED/);
+    expect(msg).toContain("http://127.0.0.1:2583");
+    expect(msg).toContain("https://pds.rcape.org");
   });
 });

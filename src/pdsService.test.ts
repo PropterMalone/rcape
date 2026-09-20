@@ -44,13 +44,59 @@ describe("resolvePdsServiceUrl", () => {
     ).toBe("http://127.0.0.1:2583");
   });
 
-  it("preserves a path prefix rather than silently dropping it", () => {
-    expect(
+  // This test previously asserted that a path prefix was PRESERVED, which was a
+  // guarantee the code could not keep: @atproto/xrpc calls `/xrpc/<nsid>` as an
+  // absolute path against the base, so the prefix never reached the wire. An
+  // assertion of a false promise is worse than no assertion — refuse the input.
+  it("refuses a path prefix instead of promising to honour one", () => {
+    expect(() =>
       resolvePdsServiceUrl({
         serviceUrl: "http://127.0.0.1:2583/pds",
         host: HOST,
       }),
-    ).toBe("http://127.0.0.1:2583/pds");
+    ).toThrow(/must not carry a path/);
+  });
+
+  it("a bare trailing slash is a path-less URL, not a prefix", () => {
+    expect(
+      resolvePdsServiceUrl({
+        serviceUrl: "http://127.0.0.1:2583/",
+        host: HOST,
+      }),
+    ).toBe("http://127.0.0.1:2583");
+  });
+
+  it("allows plaintext to loopback and private ranges", () => {
+    for (const h of [
+      "127.0.0.1:2583",
+      "localhost:2583",
+      "10.0.0.5:2583",
+      "192.168.1.9:2583",
+      "172.16.0.2:2583",
+    ]) {
+      expect(
+        resolvePdsServiceUrl({ serviceUrl: `http://${h}`, host: HOST }),
+      ).toBe(`http://${h}`);
+    }
+  });
+
+  it("refuses plaintext to a public host — that would ship session tokens in the clear", () => {
+    expect(() =>
+      resolvePdsServiceUrl({ serviceUrl: "http://pds.rcape.org", host: HOST }),
+    ).toThrow(/only use http:\/\/ for a loopback/);
+    // 172.15 and 172.32 sit outside the private block and must not slip through.
+    expect(() =>
+      resolvePdsServiceUrl({
+        serviceUrl: "http://172.15.0.1:2583",
+        host: HOST,
+      }),
+    ).toThrow(/loopback/);
+    expect(() =>
+      resolvePdsServiceUrl({
+        serviceUrl: "http://172.32.0.1:2583",
+        host: HOST,
+      }),
+    ).toThrow(/loopback/);
   });
 
   it("surrounding whitespace does not defeat the override", () => {

@@ -181,7 +181,21 @@ export async function recordCycleOutcome(
   nowIso: string,
   window: number = CYCLE_WINDOW,
 ): Promise<void> {
-  const prev = await loadJson<CycleStats | null>(path, () => null);
+  // The window is DIAGNOSTIC state, unlike the ledger: losing it costs a few
+  // minutes of history, while failing to write it costs the failure-rate signal
+  // entirely. loadJson throws CorruptStateError when the primary is torn AND the
+  // .bak is unreadable — previously that threw here on every subsequent cycle,
+  // so the file was never rewritten and the watchdog went permanently blind
+  // while still looking healthy. Start a fresh window instead, and say so.
+  let prev: CycleStats | null = null;
+  try {
+    prev = await loadJson<CycleStats | null>(path, () => null);
+  } catch (e) {
+    console.error(
+      "cycle-stats unreadable, starting a fresh window:",
+      e instanceof Error ? e.message : e,
+    );
+  }
   await saveJson(path, appendCycleOutcome(prev, ok, nowIso, window));
 }
 

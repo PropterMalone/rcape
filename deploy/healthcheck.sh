@@ -90,6 +90,26 @@ if [ -f "$CYCLES" ]; then
   FAILURES=$(sed -n 's/.*"failures"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$CYCLES" | head -n 1)
   WINDOW=$(sed -n 's/.*"window"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$CYCLES" | head -n 1)
 
+  # FIRST: is the window still being written? A valid-but-frozen cycles.json
+  # (the cycle writer wedged while polls keep succeeding) reads healthy forever
+  # if we only ever look at the ratio — the same age-blindness in reverse that
+  # made the heartbeat miss a half-failing bot. Age it like the heartbeat.
+  CYC_SEEN=$(sed -n 's/.*"updatedAt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CYCLES" | head -n 1)
+  # Guard the empty case explicitly: GNU `date -d ""` does NOT fail, it resolves
+  # to TODAY AT MIDNIGHT — so an absent updatedAt (older bot build, or a corrupt
+  # file) would read as hours stale and false-alarm, when the design says skip.
+  CYC_EPOCH=""
+  if [ -n "$CYC_SEEN" ]; then
+    CYC_EPOCH=$(date -d "$CYC_SEEN" +%s 2>/dev/null)
+  fi
+  if [ -n "$CYC_EPOCH" ]; then
+    CYC_AGE=$((NOW_EPOCH - CYC_EPOCH))
+    if [ "$CYC_AGE" -gt "$STALE_S" ]; then
+      alert "rcape-bot rate signal FROZEN — cycles.json last written ${CYC_AGE}s ago (threshold ${STALE_S}s) while the heartbeat is fresh. The failure-rate watchdog is blind; investigate before trusting a clean healthcheck."
+      exit 1
+    fi
+  fi
+
   # Every field must be present and the window FULL before judging: a bot that
   # just started has 2 samples, and 1 failure out of 2 is not a 50% outage.
   if [ -n "$TOTAL" ] && [ -n "$FAILURES" ] && [ -n "$WINDOW" ] &&

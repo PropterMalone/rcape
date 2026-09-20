@@ -204,22 +204,57 @@ export async function paginateMentions(
   return out;
 }
 
+// pattern: Functional Core
+// After login, @atproto/api resolves the account's DID document and prefers the
+// PDS endpoint it names over the service URL we constructed with:
+// `atp-agent.js:167` returns `this.pdsUrl || this.serviceUrl`, with pdsUrl set
+// from the doc at :418. @ape's DID doc names the PUBLIC host, so on paper that
+// re-target restores the exact hairpin PDS_SERVICE_URL exists to remove.
+//
+// Empirically it does NOT today — the live bot held 127.0.0.1:2583 on 25/25
+// sampled connections. But "today's library version happens to behave" is not a
+// property worth resting an outage fix on silently, and a re-target would be
+// invisible until latency crept back. So compare and say so. Deliberately a
+// WARNING, not a throw: a library change must not take down a working bot, and
+// the failure-rate watchdog now catches the degradation that would follow.
+export function retargetWarning(
+  configured: string,
+  effective: string | undefined,
+): string | undefined {
+  if (!effective) return undefined;
+  const originOf = (u: string): string => {
+    try {
+      return new URL(u).origin;
+    } catch {
+      return u;
+    }
+  };
+  if (originOf(configured) === originOf(effective)) return undefined;
+  return `PDS transport RE-TARGETED after login: configured ${originOf(configured)} but the session resolved ${originOf(effective)} (from the DID document). Local traffic may be leaving the host again — see pdsService.ts.`;
+}
+
+function warnIfRetargeted(configured: string, agent: unknown): void {
+  const pdsUrl = (agent as { pdsUrl?: { toString(): string } }).pdsUrl;
+  const msg = retargetWarning(configured, pdsUrl?.toString());
+  if (msg) console.warn(msg);
+}
+
 export async function createBotAgent(opts: {
   host?: string;
   identifier: string;
   password: string;
 }): Promise<BotAgent> {
-  const agent = new AtpAgent({
-    // PDS_SERVICE_URL is the transport when set (loopback on the host that runs
-    // the PDS); `host` stays the public identity hostname. See pdsService.ts.
-    service: resolvePdsServiceUrl({
-      serviceUrl: process.env.PDS_SERVICE_URL,
-      host: opts.host ?? DEFAULT_PDS_HOST,
-    }),
+  // PDS_SERVICE_URL is the transport when set (loopback on the host that runs
+  // the PDS); `host` stays the public identity hostname. See pdsService.ts.
+  const service = resolvePdsServiceUrl({
+    serviceUrl: process.env.PDS_SERVICE_URL,
+    host: opts.host ?? DEFAULT_PDS_HOST,
   });
+  const agent = new AtpAgent({ service });
   await agent.login({ identifier: opts.identifier, password: opts.password });
   const did = agent.session?.did;
   if (!did) throw new Error("bot login failed: no session DID");
+  warnIfRetargeted(service, agent);
 
   return {
     did,

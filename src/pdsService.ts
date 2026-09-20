@@ -43,7 +43,35 @@ export function resolvePdsServiceUrl(opts: {
   if (!parsed.hostname) {
     throw new Error(`PDS_SERVICE_URL has no host (got "${raw}")`);
   }
-  // Strip trailing slashes only — a path prefix is preserved, since dropping one
-  // an operator wrote would be another silent redirect of the transport.
+  // A path prefix CANNOT be honoured, so it is refused rather than accepted and
+  // quietly dropped. @atproto/xrpc resolves each call as `new URL("/xrpc/<nsid>",
+  // serviceUri)` (xrpc/dist/client.js:53, util.js:34) — an absolute path, which
+  // discards any prefix on the base. Accepting `…:2583/pds` would send traffic to
+  // `…:2583/xrpc/…` while the operator believed otherwise; this code previously
+  // preserved the prefix and a test asserted that as a guarantee it never had.
+  const path = parsed.pathname.replace(/\/+$/, "");
+  if (path !== "") {
+    throw new Error(
+      `PDS_SERVICE_URL must not carry a path — atproto ignores it and calls /xrpc/* at the origin (got "${raw}")`,
+    );
+  }
+  // Plaintext is for reaching a PDS on this machine or this network. Allowing it
+  // to an arbitrary host would ship session tokens in the clear, and the setting
+  // exists precisely so that case is a loopback hop.
+  if (parsed.protocol === "http:" && !isLocalHost(parsed.hostname)) {
+    throw new Error(
+      `PDS_SERVICE_URL may only use http:// for a loopback or private-network host; use https:// for ${parsed.hostname}`,
+    );
+  }
   return raw.replace(/\/+$/, "");
+}
+
+// Loopback or RFC1918 — the hosts where plaintext never leaves trusted wire.
+function isLocalHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "::1" || h.startsWith("127.")) return true;
+  if (h.startsWith("10.") || h.startsWith("192.168.")) return true;
+  const m = h.match(/^172\.(\d{1,2})\./);
+  return m ? Number(m[1]) >= 16 && Number(m[1]) <= 31 : false;
 }
