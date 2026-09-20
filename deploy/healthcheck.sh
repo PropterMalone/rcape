@@ -29,6 +29,14 @@ HEARTBEAT="$SCRIPT_DIR/../data/heartbeat.json"
 
 STALE_S="${RCAPE_HEARTBEAT_STALE_S:-600}"
 
+# Both thresholds are fed to `[ ... -gt ]`, which ABORTS the test on a
+# non-numeric value ("[: Illegal number:") and leaves the script exiting 0
+# without alerting — a malformed override silently disables the very check it
+# was tuning. Fall back to the default instead. Matches cycleStats.parseWindow.
+case "$STALE_S" in
+  '' | *[!0-9]*) STALE_S=600 ;;
+esac
+
 alert() {
   # body is "$1"; notify.sh is best-effort and always exits 0 — a dead
   # notification channel must not wedge the cron.
@@ -73,6 +81,9 @@ fi
 # alerted. Total silence is already covered above, and a deploy should not page.
 CYCLES="$SCRIPT_DIR/../data/cycles.json"
 FAIL_PCT="${RCAPE_FAILRATE_PCT:-30}"
+case "$FAIL_PCT" in
+  '' | *[!0-9]*) FAIL_PCT=30 ;;
+esac
 
 if [ -f "$CYCLES" ]; then
   TOTAL=$(sed -n 's/.*"total"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$CYCLES" | head -n 1)

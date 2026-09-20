@@ -10,6 +10,10 @@ dist/
 data/
 pds/data/
 pds/pds.env
+# Same gap as `.env` above, and this one holds the PDS SUPER-ADMIN password:
+# `.env.*` has no slash so it matches basenames beginning `.env.`, which
+# `pds.env.bak` does not. Needs its own pattern.
+pds/pds.env.*
 *.log
 .DS_Store
 
