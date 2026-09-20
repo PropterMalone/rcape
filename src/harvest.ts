@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 // Pre-shelve harvest: grows the archive from a PRIVATE, hand-picked set of legal-
-// journalist accounts (Karl curates them in .env — never a public list, never
-// @-mentioned). Two steps run in the poll loop:
+// journalist accounts (the operator curates them in .env — never a public list,
+// never @-mentioned). Two steps run in the poll loop:
 //
 //  harvestOnce      — cadence-gated; reads each account's author feed (no CL quota,
 //                     AppView) and enqueues the CourtListener dockets they link into

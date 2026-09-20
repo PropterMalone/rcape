@@ -1726,7 +1726,7 @@ describe("thread-scan (v1a)", () => {
         cid: "cr",
         authorDid: "did:alice",
         authorHandle: "alice.test",
-        // Bluesky-truncated text; the full URL rides in links (Karl's exact case).
+        // Bluesky-truncated text; the full URL rides in links.
         text: "www.courtlistener.com/docket/73482...",
         links: [
           "https://www.courtlistener.com/docket/73482575/kahn-v-anthropic-pbc/",
