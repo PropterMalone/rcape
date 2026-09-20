@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { AllowlistCache, resolveOwnerDid } from "./allowlist.js";
 import { announceProvision } from "./announce.js";
-import { saveJson } from "./atomicJson.js";
+import { loadJson, saveJson } from "./atomicJson.js";
 import { type BotAgent, createBotAgent } from "./botAgent.js";
 import type { MentionNotif } from "./botAgent.js";
 import { buildCaseCard } from "./card.js";
@@ -22,6 +22,11 @@ import {
   parseClTokens,
 } from "./courtlistener.js";
 import type { ClSearchPage } from "./courtlistener.types.js";
+import {
+  type CycleStats,
+  appendCycleOutcome,
+  parseWindow,
+} from "./cycleStats.js";
 import { regenerateDirectory } from "./directorySync.js";
 import { type Facet, type MentionFacet, mentionFacets } from "./facet.js";
 import { GeminiClient, inferCaseFactory } from "./gemini.js";
@@ -160,6 +165,26 @@ export async function writeHeartbeat(
   await saveJson(path, { at: nowIso });
 }
 
+// How many recent cycles the failure-rate window retains. Guarded parse so a
+// malformed env falls back to the default instead of disabling the signal.
+const CYCLE_WINDOW = parseWindow(process.env.RCAPE_CYCLE_WINDOW);
+
+// pattern: Imperative Shell
+// Record ONE cycle outcome into the rolling window (data/cycles.json). Kept in a
+// file of its own rather than folded into the heartbeat: the heartbeat's
+// contract is "last SUCCESS", and writing to it on a failure would refresh the
+// very stamp the dead-man's-switch ages. Best-effort at the call site, same as
+// the heartbeat — a window we can't write is no worse than not having one.
+export async function recordCycleOutcome(
+  path: string,
+  ok: boolean,
+  nowIso: string,
+  window: number = CYCLE_WINDOW,
+): Promise<void> {
+  const prev = await loadJson<CycleStats | null>(path, () => null);
+  await saveJson(path, appendCycleOutcome(prev, ok, nowIso, window));
+}
+
 // pattern: Functional Core
 // True only for a HARD auth failure from an XRPC call — the class of error after
 // which every pollOnce throws forever (the loop catches-and-logs, the process
@@ -213,7 +238,17 @@ export function authErrorSummary(e: unknown): string {
 export async function runPollCycle(
   deps: BotDeps,
   heartbeatPath: string,
+  cyclesPath: string,
 ): Promise<void> {
+  // Every exit path records an outcome — that is the whole point of the window,
+  // so it is best-effort but never skipped.
+  const record = (ok: boolean): Promise<void> =>
+    recordCycleOutcome(cyclesPath, ok, new Date().toISOString()).catch((e) =>
+      console.error(
+        "cycle-stats write failed:",
+        e instanceof Error ? e.message : e,
+      ),
+    );
   try {
     await pollOnce(deps);
     // Heartbeat ONLY on the success path: a caught error below leaves the prior
@@ -226,6 +261,7 @@ export async function runPollCycle(
         e instanceof Error ? e.message : e,
       ),
     );
+    await record(true);
   } catch (e) {
     // A HARD auth failure (refresh-token expiry, app-password rotation, PDS
     // restart) makes every subsequent pollOnce throw forever — caught here, the
@@ -248,6 +284,7 @@ export async function runPollCycle(
     } else {
       console.error("poll cycle failed:", e instanceof Error ? e.message : e);
     }
+    await record(false);
   }
 }
 
@@ -1442,9 +1479,17 @@ async function main(): Promise<void> {
   const heartbeatPath = fileURLToPath(
     new URL("../data/heartbeat.json", import.meta.url),
   );
-  console.log(`RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms.`);
+  // Rolling pass/fail window (also read by deploy/healthcheck.sh). Separate from
+  // the heartbeat so a failed cycle can be recorded without refreshing the
+  // "last success" stamp the staleness check depends on.
+  const cyclesPath = fileURLToPath(
+    new URL("../data/cycles.json", import.meta.url),
+  );
+  console.log(
+    `RC Ape bot up as ${agent.did}; polling every ${intervalMs}ms (failure-rate window ${CYCLE_WINDOW} cycles).`,
+  );
   for (;;) {
-    await runPollCycle(deps, heartbeatPath);
+    await runPollCycle(deps, heartbeatPath, cyclesPath);
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

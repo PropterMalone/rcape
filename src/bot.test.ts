@@ -13,6 +13,7 @@ import {
 } from "./bot.js";
 import type { BotAgent, MentionNotif } from "./botAgent.js";
 import { ThrottledError } from "./courtlistener.js";
+import type { CycleStats } from "./cycleStats.js";
 import {
   chargeQuota,
   emptyLedger,
@@ -2461,9 +2462,11 @@ describe("runPollCycle auth self-heal", () => {
   // A minimal cfg/deps whose pollOnce throws because listMentions rejects. The
   // throw is what runPollCycle's catch classifies; an auth error must drive a
   // reauth(), an ordinary error must not.
-  async function cycleWith(
-    rejection: unknown,
-  ): Promise<{ reauths: number[]; heartbeatWritten: boolean }> {
+  async function cycleWith(rejection: unknown): Promise<{
+    reauths: number[];
+    heartbeatWritten: boolean;
+    cycles: CycleStats | null;
+  }> {
     const dir = await mkdtemp(join(tmpdir(), "rcape-cycle-"));
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -2488,14 +2491,21 @@ describe("runPollCycle auth self-heal", () => {
         queuePath: join(dir, "queue.json"),
       };
       const heartbeatPath = join(dir, "heartbeat.json");
-      await runPollCycle(deps, heartbeatPath);
+      const cyclesPath = join(dir, "cycles.json");
+      await runPollCycle(deps, heartbeatPath, cyclesPath);
       let heartbeatWritten = true;
       try {
         await readFile(heartbeatPath, "utf8");
       } catch {
         heartbeatWritten = false;
       }
-      return { reauths, heartbeatWritten };
+      let cycles: CycleStats | null = null;
+      try {
+        cycles = JSON.parse(await readFile(cyclesPath, "utf8")) as CycleStats;
+      } catch {
+        cycles = null;
+      }
+      return { reauths, heartbeatWritten, cycles };
     } finally {
       spy.mockRestore();
       logSpy.mockRestore();
@@ -2516,6 +2526,23 @@ describe("runPollCycle auth self-heal", () => {
   it("does not write a heartbeat when the cycle fails", async () => {
     const { heartbeatWritten } = await cycleWith({ error: "ExpiredToken" });
     expect(heartbeatWritten).toBe(false);
+  });
+
+  // The gap the 2026-09-20 outage exposed: a half-failing bot keeps the
+  // heartbeat fresh, so age alone reads healthy. The failure must be RECORDED
+  // even on the path that deliberately leaves the heartbeat alone.
+  it("records a failed cycle in the window even though no heartbeat is written", async () => {
+    const { heartbeatWritten, cycles } = await cycleWith(
+      new Error("fetch failed"),
+    );
+    expect(heartbeatWritten).toBe(false);
+    expect(cycles).toMatchObject({ total: 1, failures: 1 });
+  });
+
+  it("records the auth-error path too, after the reauth attempt", async () => {
+    const { reauths, cycles } = await cycleWith({ error: "ExpiredToken" });
+    expect(reauths).toHaveLength(1);
+    expect(cycles).toMatchObject({ total: 1, failures: 1 });
   });
 
   it("writes a heartbeat and does not reauth on a successful cycle", async () => {
@@ -2539,12 +2566,18 @@ describe("runPollCycle auth self-heal", () => {
         queuePath: join(dir, "queue.json"),
       };
       const heartbeatPath = join(dir, "heartbeat.json");
-      await runPollCycle(deps, heartbeatPath);
+      const cyclesPath = join(dir, "cycles.json");
+      await runPollCycle(deps, heartbeatPath, cyclesPath);
       const parsed = JSON.parse(await readFile(heartbeatPath, "utf8")) as {
         at: string;
       };
       expect(Number.isNaN(Date.parse(parsed.at))).toBe(false);
       expect(reauths).toHaveLength(0);
+      // The same cycle also lands in the failure-rate window, as a success.
+      const cycles = JSON.parse(
+        await readFile(cyclesPath, "utf8"),
+      ) as CycleStats;
+      expect(cycles).toMatchObject({ total: 1, failures: 0 });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
