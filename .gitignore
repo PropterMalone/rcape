@@ -1,6 +1,11 @@
 node_modules/
 dist/
 .env
+# `.env` alone does not cover the copies an edit leaves behind (.env.bak,
+# .env.2026-09-20, .env.save). Those hold the same live secrets, so they are
+# ignored by pattern rather than by whoever remembers to delete them.
+.env.*
+!.env.example
 *.car
 data/
 pds/data/

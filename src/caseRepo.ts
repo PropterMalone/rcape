@@ -6,6 +6,7 @@
 
 import { AtpAgent } from "@atproto/api";
 import type { PostRef } from "./map.js";
+import { resolvePdsServiceUrl } from "./pdsService.js";
 
 export const DEFAULT_PDS_HOST = "pds.rcape.org";
 const BATCH = 20;
@@ -93,7 +94,14 @@ export class CaseRepo {
     password: string;
   }): Promise<CaseRepo> {
     const host = opts.host ?? DEFAULT_PDS_HOST;
-    const agent = new AtpAgent({ service: `https://${host}` });
+    // `host` is the public identity hostname; PDS_SERVICE_URL, when set, is the
+    // transport this process actually dials. See pdsService.ts.
+    const agent = new AtpAgent({
+      service: resolvePdsServiceUrl({
+        serviceUrl: process.env.PDS_SERVICE_URL,
+        host,
+      }),
+    });
     await agent.login({ identifier: opts.identifier, password: opts.password });
     const did = agent.session?.did;
     if (!did) throw new Error("login failed: no session DID");

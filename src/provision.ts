@@ -8,6 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { AtpAgent } from "@atproto/api";
 import { DEFAULT_PDS_HOST } from "./caseRepo.js";
+import { resolvePdsServiceUrl } from "./pdsService.js";
 
 export interface NewAccount {
   did: string;
@@ -58,7 +59,13 @@ export async function createCaseAccount(
   const c =
     client ??
     (new AtpAgent({
-      service: `https://${host}`,
+      // Minting an account is a PDS admin call, so it dials the transport
+      // (PDS_SERVICE_URL when set); the handle it creates still lives under the
+      // public identity domain. See pdsService.ts.
+      service: resolvePdsServiceUrl({
+        serviceUrl: process.env.PDS_SERVICE_URL,
+        host,
+      }),
     }) as unknown as ProvisionClient);
 
   const invite = await c.com.atproto.server.createInviteCode(

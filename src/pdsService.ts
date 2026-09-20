@@ -1,0 +1,49 @@
+// pattern: Functional Core
+// The URL a local atproto client TALKS TO — which is not the same thing as the
+// public hostname the PDS issues identities under. The two were conflated until
+// 2026-09-20: every AtpAgent on Malone dialled `https://${PDS_HOSTNAME}`, so a
+// process sitting beside the PDS container reached it by leaving the box through
+// the public tunnel and coming back. That turned a ~1ms loopback hop into a
+// 0.6-4.6s round trip, and failed outright often enough to stall the bot's poll
+// loop for a whole morning (159 failed cycles before 12:02 ET on 09-20).
+//
+// PDS_HOSTNAME stays the identity host — handles, `_atproto` DNS, the DIDs
+// already written into live repos all depend on it and must NOT change.
+// PDS_SERVICE_URL, when set, is the transport and only the transport.
+
+const HTTP_SCHEME = /^https?:\/\//i;
+
+export function resolvePdsServiceUrl(opts: {
+  // Raw operator input (`process.env.PDS_SERVICE_URL`). Absent or blank ⇒ no override.
+  serviceUrl?: string;
+  // Public PDS hostname, no scheme — the pre-override transport, still the default.
+  host: string;
+}): string {
+  const raw = opts.serviceUrl?.trim();
+  // `PDS_SERVICE_URL=` with no value is the ordinary .env shape for "not
+  // configured" (PDS_ADMIN_PASSWORD already ships that way), so blank must mean
+  // unset rather than an empty service URL.
+  if (!raw) return `https://${opts.host}`;
+
+  // A malformed override THROWS rather than falling back to `https://${host}`:
+  // that fallback is the hairpin this setting exists to avoid, so taking it
+  // silently would restore the outage on a box that looks correctly configured.
+  // An operator typo surfaces at startup, loudly, which is where it belongs.
+  if (!HTTP_SCHEME.test(raw)) {
+    throw new Error(
+      `PDS_SERVICE_URL must start with http:// or https:// (got "${raw}")`,
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`PDS_SERVICE_URL is not a valid URL (got "${raw}")`);
+  }
+  if (!parsed.hostname) {
+    throw new Error(`PDS_SERVICE_URL has no host (got "${raw}")`);
+  }
+  // Strip trailing slashes only — a path prefix is preserved, since dropping one
+  // an operator wrote would be another silent redirect of the transport.
+  return raw.replace(/\/+$/, "");
+}

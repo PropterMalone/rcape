@@ -8,6 +8,7 @@ import type { GraphClient } from "./allowlist.js";
 import { DEFAULT_PDS_HOST } from "./caseRepo.js";
 import { BOT_SELF_LABEL } from "./companionPost.js";
 import { type Facet, type RichtextRecord, extractPostLinks } from "./facet.js";
+import { resolvePdsServiceUrl } from "./pdsService.js";
 import type { StrongRef } from "./queue.js";
 import type { ThreadView } from "./thread.js";
 import {
@@ -209,7 +210,12 @@ export async function createBotAgent(opts: {
   password: string;
 }): Promise<BotAgent> {
   const agent = new AtpAgent({
-    service: `https://${opts.host ?? DEFAULT_PDS_HOST}`,
+    // PDS_SERVICE_URL is the transport when set (loopback on the host that runs
+    // the PDS); `host` stays the public identity hostname. See pdsService.ts.
+    service: resolvePdsServiceUrl({
+      serviceUrl: process.env.PDS_SERVICE_URL,
+      host: opts.host ?? DEFAULT_PDS_HOST,
+    }),
   });
   await agent.login({ identifier: opts.identifier, password: opts.password });
   const did = agent.session?.did;
